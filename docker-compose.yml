@@ -1,0 +1,40 @@
+services:
+  analytics-py:
+    build: ./services/analytics-py
+    ports:
+      - "${ANALYTICS_PORT:-8001}:8001"
+    environment:
+      - ANALYTICS_PORT=8001
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  processor-go:
+    build: ./services/processor-go
+    ports:
+      - "${PROCESSOR_PORT:-8002}:8002"
+    environment:
+      - PROCESSOR_PORT=8002
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  usermgmt-ts:
+    build: ./services/usermgmt-ts
+    ports:
+      - "${USERMGMT_PORT:-8003}:8003"
+    environment:
+      - USERMGMT_PORT=8003
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
