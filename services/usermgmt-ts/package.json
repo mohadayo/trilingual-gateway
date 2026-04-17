@@ -1,0 +1,32 @@
+{
+  "name": "usermgmt-ts",
+  "version": "1.0.0",
+  "description": "User management microservice",
+  "main": "dist/app.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/app.js",
+    "dev": "ts-node src/app.ts",
+    "test": "jest --forceExit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.0.0",
+    "@types/supertest": "^6.0.2",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.6.0"
+  }
+}
