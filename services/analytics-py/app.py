@@ -45,6 +45,25 @@ def list_events():
     return jsonify({"events": events_store, "count": len(events_store)})
 
 
+@app.route("/api/events", methods=["DELETE"])
+def delete_events():
+    event_name = request.args.get("event_name")
+    if not event_name:
+        logger.warning("Delete request missing event_name parameter")
+        return jsonify({"error": "event_name query parameter is required"}), 400
+
+    before_count = len(events_store)
+    events_store[:] = [e for e in events_store if e["event_name"] != event_name]
+    deleted_count = before_count - len(events_store)
+
+    if deleted_count == 0:
+        logger.info("No events found for deletion: %s", event_name)
+        return jsonify({"error": "No events found with the specified event_name"}), 404
+
+    logger.info("Deleted %d events with event_name=%s", deleted_count, event_name)
+    return jsonify({"message": "Events deleted", "deleted_count": deleted_count})
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     summary: dict[str, int] = {}
