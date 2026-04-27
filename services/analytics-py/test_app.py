@@ -1,5 +1,12 @@
 import pytest
-from app import app
+from app import app, events_store
+
+
+@pytest.fixture(autouse=True)
+def clear_store():
+    events_store.clear()
+    yield
+    events_store.clear()
 
 
 @pytest.fixture
@@ -43,7 +50,7 @@ def test_list_events(client):
     resp = client.get("/api/events")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["count"] >= 3
+    assert data["count"] == 3
 
 
 def test_list_events_filtered(client):
@@ -54,6 +61,30 @@ def test_list_events_filtered(client):
     assert all(e["event_name"] == "filter_test" for e in data["events"])
 
 
+def test_delete_events_success(client):
+    client.post("/api/events", json={"event_name": "to_delete"})
+    client.post("/api/events", json={"event_name": "to_delete"})
+    client.post("/api/events", json={"event_name": "keep"})
+
+    resp = client.delete("/api/events?event_name=to_delete")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_count"] == 2
+
+    list_resp = client.get("/api/events")
+    assert list_resp.get_json()["count"] == 1
+
+
+def test_delete_events_not_found(client):
+    resp = client.delete("/api/events?event_name=nonexistent")
+    assert resp.status_code == 404
+
+
+def test_delete_events_missing_param(client):
+    resp = client.delete("/api/events")
+    assert resp.status_code == 400
+
+
 def test_events_summary(client):
     client.post("/api/events", json={"event_name": "summary_a"})
     client.post("/api/events", json={"event_name": "summary_a"})
@@ -62,4 +93,6 @@ def test_events_summary(client):
     assert resp.status_code == 200
     data = resp.get_json()
     assert "summary" in data
-    assert data["total_events"] >= 3
+    assert data["total_events"] == 3
+    assert data["summary"]["summary_a"] == 2
+    assert data["summary"]["summary_b"] == 1
