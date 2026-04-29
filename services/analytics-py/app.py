@@ -13,6 +13,8 @@ app = Flask(__name__)
 
 events_store: list[dict] = []
 
+DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
+
 
 @app.route("/health")
 def health():
@@ -39,10 +41,22 @@ def track_event():
 @app.route("/api/events", methods=["GET"])
 def list_events():
     event_name = request.args.get("event_name")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
+
+    filtered = events_store
     if event_name:
         filtered = [e for e in events_store if e["event_name"] == event_name]
-        return jsonify({"events": filtered, "count": len(filtered)})
-    return jsonify({"events": events_store, "count": len(events_store)})
+
+    total = len(filtered)
+    paginated = filtered[offset:offset + limit]
+
+    return jsonify({"events": paginated, "count": len(paginated), "total": total, "limit": limit, "offset": offset})
 
 
 @app.route("/api/events", methods=["DELETE"])
