@@ -50,6 +50,7 @@ def test_list_events(client):
     resp = client.get("/api/events")
     assert resp.status_code == 200
     data = resp.get_json()
+    assert data["total"] == 3
     assert data["count"] == 3
 
 
@@ -59,6 +60,68 @@ def test_list_events_filtered(client):
     assert resp.status_code == 200
     data = resp.get_json()
     assert all(e["event_name"] == "filter_test" for e in data["events"])
+
+
+def test_list_events_pagination_limit(client):
+    for i in range(5):
+        client.post("/api/events", json={"event_name": f"ev_{i}"})
+    resp = client.get("/api/events?limit=2")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 5
+    assert data["count"] == 2
+    assert data["limit"] == 2
+    assert data["offset"] == 0
+
+
+def test_list_events_pagination_offset(client):
+    for i in range(5):
+        client.post("/api/events", json={"event_name": f"ev_{i}"})
+    resp = client.get("/api/events?limit=2&offset=3")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 5
+    assert data["count"] == 2
+    assert data["offset"] == 3
+    assert data["events"][0]["event_name"] == "ev_3"
+
+
+def test_list_events_pagination_offset_beyond(client):
+    for i in range(3):
+        client.post("/api/events", json={"event_name": f"ev_{i}"})
+    resp = client.get("/api/events?limit=10&offset=10")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 3
+    assert data["count"] == 0
+
+
+def test_list_events_pagination_with_filter(client):
+    for i in range(4):
+        client.post("/api/events", json={"event_name": "target"})
+    client.post("/api/events", json={"event_name": "other"})
+    resp = client.get("/api/events?event_name=target&limit=2&offset=1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 4
+    assert data["count"] == 2
+
+
+def test_list_events_negative_limit(client):
+    client.post("/api/events", json={"event_name": "neg"})
+    resp = client.get("/api/events?limit=-1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert data["count"] == 1
+
+
+def test_list_events_negative_offset(client):
+    client.post("/api/events", json={"event_name": "neg"})
+    resp = client.get("/api/events?offset=-5")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["offset"] == 0
 
 
 def test_delete_events_success(client):
@@ -72,7 +135,7 @@ def test_delete_events_success(client):
     assert data["deleted_count"] == 2
 
     list_resp = client.get("/api/events")
-    assert list_resp.get_json()["count"] == 1
+    assert list_resp.get_json()["total"] == 1
 
 
 def test_delete_events_not_found(client):
