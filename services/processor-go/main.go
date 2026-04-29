@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -38,6 +39,17 @@ func init() {
 	logger = log.New(os.Stdout, "[processor-go] ", log.LstdFlags)
 }
 
+func newUUID() string {
+	var uuid [16]byte
+	if _, err := rand.Read(uuid[:]); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	uuid[6] = (uuid[6] & 0x0f) | 0x40
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(HealthResponse{
@@ -73,7 +85,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg := Message{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:        newUUID(),
 		Channel:   input.Channel,
 		Payload:   input.Payload,
 		Processed: true,

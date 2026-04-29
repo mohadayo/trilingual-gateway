@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sync"
 	"testing"
 )
 
@@ -145,5 +147,55 @@ func TestPublishMethodNotAllowed(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestNewUUIDFormat(t *testing.T) {
+	id := newUUID()
+	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	if !uuidRegex.MatchString(id) {
+		t.Fatalf("expected UUID v4 format, got %s", id)
+	}
+}
+
+func TestNewUUIDUniqueness(t *testing.T) {
+	ids := make(map[string]bool)
+	for i := 0; i < 1000; i++ {
+		id := newUUID()
+		if ids[id] {
+			t.Fatalf("duplicate UUID generated: %s", id)
+		}
+		ids[id] = true
+	}
+}
+
+func TestNewUUIDConcurrency(t *testing.T) {
+	const goroutines = 50
+	const idsPerGoroutine = 100
+	ch := make(chan string, goroutines*idsPerGoroutine)
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < idsPerGoroutine; j++ {
+				ch <- newUUID()
+			}
+		}()
+	}
+	wg.Wait()
+	close(ch)
+
+	seen := make(map[string]bool)
+	for id := range ch {
+		if seen[id] {
+			t.Fatalf("concurrent duplicate UUID: %s", id)
+		}
+		seen[id] = true
+	}
+
+	if len(seen) != goroutines*idsPerGoroutine {
+		t.Fatalf("expected %d unique IDs, got %d", goroutines*idsPerGoroutine, len(seen))
 	}
 }
