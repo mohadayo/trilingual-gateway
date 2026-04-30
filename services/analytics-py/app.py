@@ -14,6 +14,7 @@ app = Flask(__name__)
 events_store: list[dict] = []
 
 DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
+MAX_EVENTS = int(os.getenv("MAX_EVENTS", "10000"))
 
 
 @app.route("/health")
@@ -34,6 +35,12 @@ def track_event():
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     events_store.append(event)
+
+    if len(events_store) > MAX_EVENTS:
+        removed = len(events_store) - MAX_EVENTS
+        del events_store[:removed]
+        logger.info("Evicted %d old events (store capped at %d)", removed, MAX_EVENTS)
+
     logger.info("Tracked event: %s", event["event_name"])
     return jsonify({"message": "Event tracked", "event": event}), 201
 
