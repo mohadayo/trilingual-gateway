@@ -159,3 +159,25 @@ def test_events_summary(client):
     assert data["total_events"] == 3
     assert data["summary"]["summary_a"] == 2
     assert data["summary"]["summary_b"] == 1
+
+
+def test_events_store_max_capacity(client, monkeypatch):
+    monkeypatch.setattr("app.MAX_EVENTS", 3)
+    for i in range(5):
+        client.post("/api/events", json={"event_name": f"cap_{i}"})
+    resp = client.get("/api/events")
+    data = resp.get_json()
+    assert data["total"] == 3
+    names = [e["event_name"] for e in data["events"]]
+    assert "cap_0" not in names
+    assert "cap_1" not in names
+    assert "cap_4" in names
+
+
+def test_events_store_within_capacity(client, monkeypatch):
+    monkeypatch.setattr("app.MAX_EVENTS", 10)
+    for i in range(3):
+        client.post("/api/events", json={"event_name": f"ok_{i}"})
+    resp = client.get("/api/events")
+    data = resp.get_json()
+    assert data["total"] == 3

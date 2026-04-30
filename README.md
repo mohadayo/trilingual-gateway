@@ -66,7 +66,8 @@ make lint          # Run all linters
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/events` | Track an event |
-| GET | `/api/events` | List events (optional `?event_name=` filter) |
+| GET | `/api/events` | List events (`?event_name=`, `?limit=`, `?offset=`) |
+| DELETE | `/api/events` | Delete events by name (`?event_name=` required) |
 | GET | `/api/events/summary` | Aggregated event counts by name |
 
 **Example:**
@@ -75,6 +76,9 @@ make lint          # Run all linters
 curl -X POST http://localhost:8001/api/events \
   -H "Content-Type: application/json" \
   -d '{"event_name": "page_view", "properties": {"page": "/home"}}'
+
+# List with pagination
+curl "http://localhost:8001/api/events?limit=10&offset=0"
 
 # Get summary
 curl http://localhost:8001/api/events/summary
@@ -108,6 +112,7 @@ curl http://localhost:8002/api/stats
 | POST | `/api/users` | Create a user |
 | GET | `/api/users` | List all users |
 | GET | `/api/users/:id` | Get user by ID |
+| PUT | `/api/users/:id` | Update a user (partial update) |
 | DELETE | `/api/users/:id` | Delete a user |
 
 **Example:**
@@ -129,6 +134,8 @@ See [`.env.example`](.env.example) for all available configuration:
 |----------|---------|-------------|
 | `ANALYTICS_PORT` | 8001 | Analytics service port |
 | `LOG_LEVEL` | INFO | Python logging level |
+| `MAX_EVENTS` | 10000 | Maximum events stored in memory (oldest evicted) |
+| `DEFAULT_PAGE_LIMIT` | 50 | Default page size for event listing |
 | `PROCESSOR_PORT` | 8002 | Processor service port |
 | `USERMGMT_PORT` | 8003 | User management service port |
 
