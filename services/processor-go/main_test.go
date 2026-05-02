@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -166,6 +168,45 @@ func TestNewUUIDUniqueness(t *testing.T) {
 			t.Fatalf("duplicate UUID generated: %s", id)
 		}
 		ids[id] = true
+	}
+}
+
+func TestPublishBodyTooLarge(t *testing.T) {
+	resetMessages()
+
+	largePayload := strings.Repeat("a", 128*1024)
+	body := fmt.Sprintf(`{"channel":"test","payload":"%s"}`, largePayload)
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	publishHandler(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+
+	var resp ErrorResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Error != "request body too large" {
+		t.Errorf("expected 'request body too large', got %s", resp.Error)
+	}
+}
+
+func TestStatsHandler_EmptyStore(t *testing.T) {
+	resetMessages()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total_messages"].(float64)) != 0 {
+		t.Fatalf("expected 0 total_messages, got %v", resp["total_messages"])
 	}
 }
 

@@ -7,7 +7,7 @@ test-python:
 	cd services/analytics-py && pip install -q -r requirements-dev.txt && pytest -v
 
 test-go:
-	cd services/processor-go && go test -v ./...
+	cd services/processor-go && go test -race -v ./...
 
 test-ts:
 	cd services/usermgmt-ts && npm install && npm test
