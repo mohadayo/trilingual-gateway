@@ -240,3 +240,72 @@ func TestNewUUIDConcurrency(t *testing.T) {
 		t.Fatalf("expected %d unique IDs, got %d", goroutines*idsPerGoroutine, len(seen))
 	}
 }
+
+func TestMessageStoreMaxCapacity(t *testing.T) {
+	resetMessages()
+	oldMax := maxMessages
+	maxMessages = 3
+	defer func() { maxMessages = oldMax }()
+
+	for i := 0; i < 5; i++ {
+		body, _ := json.Marshal(map[string]string{
+			"channel": fmt.Sprintf("ch-%d", i),
+			"payload": "data",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d", w.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	count := int(resp["count"].(float64))
+	if count != 3 {
+		t.Fatalf("expected 3 messages (capped), got %d", count)
+	}
+
+	msgs := resp["messages"].([]interface{})
+	first := msgs[0].(map[string]interface{})
+	last := msgs[2].(map[string]interface{})
+	if first["channel"] != "ch-2" {
+		t.Errorf("expected oldest remaining to be ch-2, got %s", first["channel"])
+	}
+	if last["channel"] != "ch-4" {
+		t.Errorf("expected newest to be ch-4, got %s", last["channel"])
+	}
+}
+
+func TestMessageStoreWithinCapacity(t *testing.T) {
+	resetMessages()
+	oldMax := maxMessages
+	maxMessages = 10
+	defer func() { maxMessages = oldMax }()
+
+	for i := 0; i < 3; i++ {
+		body, _ := json.Marshal(map[string]string{
+			"channel": fmt.Sprintf("ch-%d", i),
+			"payload": "data",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	count := int(resp["count"].(float64))
+	if count != 3 {
+		t.Fatalf("expected 3 messages, got %d", count)
+	}
+}
