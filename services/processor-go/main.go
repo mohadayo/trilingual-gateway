@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -30,13 +34,20 @@ type ErrorResponse struct {
 }
 
 var (
-	messages []Message
-	mu       sync.RWMutex
-	logger   *log.Logger
+	messages    []Message
+	mu          sync.RWMutex
+	logger      *log.Logger
+	maxMessages int
 )
 
 func init() {
 	logger = log.New(os.Stdout, "[processor-go] ", log.LstdFlags)
+	maxMessages = 10000
+	if v := os.Getenv("MAX_MESSAGES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxMessages = n
+		}
+	}
 }
 
 func newUUID() string {
@@ -101,6 +112,11 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 	mu.Lock()
 	messages = append(messages, msg)
+	if len(messages) > maxMessages {
+		removed := len(messages) - maxMessages
+		messages = messages[removed:]
+		logger.Printf("Evicted %d old messages (store capped at %d)", removed, maxMessages)
+	}
 	mu.Unlock()
 
 	logger.Printf("Processed message on channel %s", msg.Channel)
@@ -183,8 +199,37 @@ func main() {
 	})
 	mux.HandleFunc("/api/stats", statsHandler)
 
-	logger.Printf("Starting processor service on port %s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		logger.Fatalf("Server failed: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
 	}
+
+	shutdownTimeout := 30 * time.Second
+	if v := os.Getenv("SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			shutdownTimeout = time.Duration(n) * time.Second
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		logger.Printf("Starting processor service on port %s", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	logger.Println("Shutting down gracefully...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Fatalf("Forced shutdown: %v", err)
+	}
+	logger.Println("Server stopped")
 }
