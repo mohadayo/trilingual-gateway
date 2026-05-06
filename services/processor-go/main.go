@@ -34,20 +34,51 @@ type ErrorResponse struct {
 }
 
 var (
-	messages    []Message
-	mu          sync.RWMutex
-	logger      *log.Logger
-	maxMessages int
+	messages         []Message
+	mu               sync.RWMutex
+	logger           *log.Logger
+	maxMessages      int
+	defaultPageLimit int
+	maxPageLimit     int
 )
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fallback
+}
 
 func init() {
 	logger = log.New(os.Stdout, "[processor-go] ", log.LstdFlags)
-	maxMessages = 10000
-	if v := os.Getenv("MAX_MESSAGES"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			maxMessages = n
+	maxMessages = envInt("MAX_MESSAGES", 10000)
+	defaultPageLimit = envInt("DEFAULT_PAGE_LIMIT", 50)
+	maxPageLimit = envInt("MAX_PAGE_LIMIT", 1000)
+}
+
+func parsePagination(q map[string][]string) (limit, offset int) {
+	limit = defaultPageLimit
+	if vs, ok := q["limit"]; ok && len(vs) > 0 {
+		if n, err := strconv.Atoi(vs[0]); err == nil && n >= 0 {
+			limit = n
 		}
 	}
+	if limit <= 0 {
+		limit = defaultPageLimit
+	}
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
+
+	offset = 0
+	if vs, ok := q["offset"]; ok && len(vs) > 0 {
+		if n, err := strconv.Atoi(vs[0]); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }
 
 func newUUID() string {
@@ -134,30 +165,45 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	channel := r.URL.Query().Get("channel")
+	query := r.URL.Query()
+	channel := query.Get("channel")
+	limit, offset := parsePagination(query)
 
 	mu.RLock()
 	defer mu.RUnlock()
 
-	var result []Message
+	var filtered []Message
 	if channel != "" {
 		for _, m := range messages {
 			if m.Channel == channel {
-				result = append(result, m)
+				filtered = append(filtered, m)
 			}
 		}
 	} else {
-		result = messages
+		filtered = messages
 	}
 
-	if result == nil {
-		result = []Message{}
+	total := len(filtered)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := filtered[start:end]
+	if page == nil {
+		page = []Message{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"messages": result,
-		"count":    len(result),
+		"messages": page,
+		"count":    len(page),
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
 	})
 }
 
