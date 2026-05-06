@@ -309,3 +309,152 @@ func TestMessageStoreWithinCapacity(t *testing.T) {
 		t.Fatalf("expected 3 messages, got %d", count)
 	}
 }
+
+func seedMessages(t *testing.T, n int, channel string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		body, _ := json.Marshal(map[string]string{
+			"channel": channel,
+			"payload": fmt.Sprintf("msg-%d", i),
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("seed failed at %d: %d", i, w.Code)
+		}
+	}
+}
+
+func TestMessagesPaginationDefaults(t *testing.T) {
+	resetMessages()
+	seedMessages(t, 75, "p")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["total"].(float64)) != 75 {
+		t.Fatalf("expected total 75, got %v", resp["total"])
+	}
+	if int(resp["limit"].(float64)) != 50 {
+		t.Fatalf("expected default limit 50, got %v", resp["limit"])
+	}
+	if int(resp["offset"].(float64)) != 0 {
+		t.Fatalf("expected default offset 0, got %v", resp["offset"])
+	}
+	if int(resp["count"].(float64)) != 50 {
+		t.Fatalf("expected count 50, got %v", resp["count"])
+	}
+}
+
+func TestMessagesPaginationOffset(t *testing.T) {
+	resetMessages()
+	seedMessages(t, 30, "p")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?limit=10&offset=20", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["count"].(float64)) != 10 {
+		t.Fatalf("expected count 10, got %v", resp["count"])
+	}
+	if int(resp["total"].(float64)) != 30 {
+		t.Fatalf("expected total 30, got %v", resp["total"])
+	}
+	msgs := resp["messages"].([]interface{})
+	first := msgs[0].(map[string]interface{})
+	if first["payload"] != "msg-20" {
+		t.Errorf("expected first payload msg-20, got %v", first["payload"])
+	}
+}
+
+func TestMessagesPaginationOffsetBeyondTotal(t *testing.T) {
+	resetMessages()
+	seedMessages(t, 5, "p")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?limit=10&offset=100", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["count"].(float64)) != 0 {
+		t.Fatalf("expected count 0, got %v", resp["count"])
+	}
+	if int(resp["total"].(float64)) != 5 {
+		t.Fatalf("expected total 5, got %v", resp["total"])
+	}
+	if msgs, ok := resp["messages"].([]interface{}); !ok || len(msgs) != 0 {
+		t.Errorf("expected empty messages array, got %v", resp["messages"])
+	}
+}
+
+func TestMessagesPaginationLimitClamped(t *testing.T) {
+	resetMessages()
+	oldMax := maxPageLimit
+	maxPageLimit = 5
+	defer func() { maxPageLimit = oldMax }()
+
+	seedMessages(t, 10, "p")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?limit=999", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["limit"].(float64)) != 5 {
+		t.Fatalf("expected limit clamped to 5, got %v", resp["limit"])
+	}
+	if int(resp["count"].(float64)) != 5 {
+		t.Fatalf("expected count 5, got %v", resp["count"])
+	}
+}
+
+func TestMessagesPaginationNegativeAndInvalid(t *testing.T) {
+	resetMessages()
+	seedMessages(t, 3, "p")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?limit=-5&offset=-2", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["limit"].(float64)) != defaultPageLimit {
+		t.Fatalf("expected default limit, got %v", resp["limit"])
+	}
+	if int(resp["offset"].(float64)) != 0 {
+		t.Fatalf("expected offset 0, got %v", resp["offset"])
+	}
+}
+
+func TestMessagesPaginationWithChannelFilter(t *testing.T) {
+	resetMessages()
+	seedMessages(t, 10, "ch-a")
+	seedMessages(t, 5, "ch-b")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?channel=ch-a&limit=3&offset=2", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["total"].(float64)) != 10 {
+		t.Fatalf("expected filtered total 10, got %v", resp["total"])
+	}
+	if int(resp["count"].(float64)) != 3 {
+		t.Fatalf("expected count 3, got %v", resp["count"])
+	}
+}
