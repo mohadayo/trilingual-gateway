@@ -115,6 +115,12 @@ curl http://localhost:8002/api/stats
 | PUT | `/api/users/:id` | Update a user (partial update) |
 | DELETE | `/api/users/:id` | Delete a user |
 
+**Validation rules (POST / PUT):**
+- `username`: 必須（POSTのみ）、トリム後 1〜`MAX_USERNAME_LENGTH`（既定 50）文字
+- `email`: 必須（POSTのみ）、トリム後 1〜254 文字、簡易メール形式チェック
+- `role`: 任意、`user` / `admin` / `moderator` のいずれか（既定: `user`）
+- 不正な値は 400 を返す
+
 **Example:**
 ```bash
 # Create a user
