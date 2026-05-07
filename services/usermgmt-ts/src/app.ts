@@ -20,6 +20,91 @@ const log = (level: string, message: string) => {
   console.log(`${ts} [${level}] usermgmt-ts: ${message}`);
 };
 
+const MAX_USERNAME_LENGTH = parseInt(
+  process.env.MAX_USERNAME_LENGTH || "50",
+  10,
+);
+const MAX_EMAIL_LENGTH = 254; // RFC 5321
+const ALLOWED_ROLES = new Set(["user", "admin", "moderator"]);
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+interface ValidatedInput {
+  username?: string;
+  email?: string;
+  role?: string;
+}
+
+function validateUserInput(
+  body: Record<string, unknown>,
+  opts: { partial: boolean },
+): { ok: true; data: ValidatedInput } | { ok: false; error: string } {
+  const out: ValidatedInput = {};
+
+  const hasUsername = body.username !== undefined && body.username !== null;
+  const hasEmail = body.email !== undefined && body.email !== null;
+  const hasRole = body.role !== undefined && body.role !== null;
+
+  if (!opts.partial) {
+    if (!hasUsername) return { ok: false, error: "username is required" };
+    if (!hasEmail) return { ok: false, error: "email is required" };
+  } else if (!hasUsername && !hasEmail && !hasRole) {
+    return { ok: false, error: "at least one field is required to update" };
+  }
+
+  if (hasUsername) {
+    if (typeof body.username !== "string") {
+      return { ok: false, error: "username must be a string" };
+    }
+    const trimmed = body.username.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, error: "username must not be blank" };
+    }
+    if (trimmed.length > MAX_USERNAME_LENGTH) {
+      return {
+        ok: false,
+        error: `username must be at most ${MAX_USERNAME_LENGTH} characters`,
+      };
+    }
+    out.username = trimmed;
+  }
+
+  if (hasEmail) {
+    if (typeof body.email !== "string") {
+      return { ok: false, error: "email must be a string" };
+    }
+    const trimmed = body.email.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, error: "email must not be blank" };
+    }
+    if (trimmed.length > MAX_EMAIL_LENGTH) {
+      return {
+        ok: false,
+        error: `email must be at most ${MAX_EMAIL_LENGTH} characters`,
+      };
+    }
+    if (!EMAIL_REGEX.test(trimmed)) {
+      return { ok: false, error: "email format is invalid" };
+    }
+    out.email = trimmed;
+  }
+
+  if (hasRole) {
+    if (typeof body.role !== "string") {
+      return { ok: false, error: "role must be a string" };
+    }
+    const trimmed = body.role.trim();
+    if (!ALLOWED_ROLES.has(trimmed)) {
+      return {
+        ok: false,
+        error: `role must be one of: ${Array.from(ALLOWED_ROLES).join(", ")}`,
+      };
+    }
+    out.role = trimmed;
+  }
+
+  return { ok: true, data: out };
+}
+
 app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
@@ -29,13 +114,13 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 app.post("/api/users", (req: Request, res: Response) => {
-  const { username, email, role } = req.body;
-
-  if (!username || !email) {
-    log("WARN", "Missing username or email in request");
-    res.status(400).json({ error: "username and email are required" });
+  const validated = validateUserInput(req.body || {}, { partial: false });
+  if (!validated.ok) {
+    log("WARN", `POST /api/users rejected: ${validated.error}`);
+    res.status(400).json({ error: validated.error });
     return;
   }
+  const { username, email, role } = validated.data;
 
   const existing = Array.from(users.values()).find((u) => u.email === email);
   if (existing) {
@@ -47,8 +132,8 @@ app.post("/api/users", (req: Request, res: Response) => {
   const now = new Date().toISOString();
   const user: User = {
     id: uuidv4(),
-    username,
-    email,
+    username: username as string,
+    email: email as string,
     role: role || "user",
     created_at: now,
     updated_at: now,
@@ -80,12 +165,13 @@ app.put("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
     return;
   }
 
-  const { username, email, role } = req.body;
-
-  if (!username && !email && !role) {
-    res.status(400).json({ error: "at least one field is required to update" });
+  const validated = validateUserInput(req.body || {}, { partial: true });
+  if (!validated.ok) {
+    log("WARN", `PUT /api/users/${user.id} rejected: ${validated.error}`);
+    res.status(400).json({ error: validated.error });
     return;
   }
+  const { username, email, role } = validated.data;
 
   if (email && email !== user.email) {
     const duplicate = Array.from(users.values()).find(
