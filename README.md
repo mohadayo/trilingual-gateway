@@ -142,6 +142,9 @@ See [`.env.example`](.env.example) for all available configuration:
 | `LOG_LEVEL` | INFO | Python logging level |
 | `MAX_EVENTS` | 10000 | Maximum events stored in memory (oldest evicted) |
 | `DEFAULT_PAGE_LIMIT` | 50 | Default page size for event listing |
+| `MAX_PAGE_LIMIT` | 500 | analytics-py: `GET /api/events` の `limit` 上限 |
+| `MAX_PAYLOAD_SIZE` | 1048576 | analytics-py: リクエストボディの最大サイズ（バイト） |
+| `MAX_EVENT_NAME_LENGTH` | 200 | analytics-py: `event_name` の最大文字数 |
 | `PROCESSOR_PORT` | 8002 | Processor service port |
 | `USERMGMT_PORT` | 8003 | User management service port |
 
