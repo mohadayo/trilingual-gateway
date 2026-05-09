@@ -174,6 +174,65 @@ def test_events_store_max_capacity(client, monkeypatch):
     assert "cap_4" in names
 
 
+def test_track_event_blank_name(client):
+    resp = client.post("/api/events", json={"event_name": "   "})
+    assert resp.status_code == 400
+    assert "blank" in resp.get_json()["error"].lower()
+
+
+def test_track_event_non_string_name(client):
+    resp = client.post("/api/events", json={"event_name": 123})
+    assert resp.status_code == 400
+    assert "string" in resp.get_json()["error"].lower()
+
+
+def test_track_event_long_name(client, monkeypatch):
+    monkeypatch.setattr("app.MAX_EVENT_NAME_LENGTH", 10)
+    resp = client.post("/api/events", json={"event_name": "x" * 100})
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "too long" in data["error"].lower()
+    assert data["max_length"] == 10
+
+
+def test_track_event_strips_whitespace(client):
+    resp = client.post("/api/events", json={"event_name": "  page_view  "})
+    assert resp.status_code == 201
+    assert resp.get_json()["event"]["event_name"] == "page_view"
+
+
+def test_track_event_invalid_properties(client):
+    resp = client.post("/api/events", json={"event_name": "ev", "properties": ["not", "a", "dict"]})
+    assert resp.status_code == 400
+    assert "object" in resp.get_json()["error"].lower()
+
+
+def test_track_event_null_properties_accepted(client):
+    resp = client.post("/api/events", json={"event_name": "ev", "properties": None})
+    assert resp.status_code == 201
+    assert resp.get_json()["event"]["properties"] == {}
+
+
+def test_track_event_payload_too_large(client, monkeypatch):
+    monkeypatch.setattr("app.MAX_PAYLOAD_SIZE", 50)
+    big_payload = {"event_name": "ev", "properties": {"data": "x" * 100}}
+    resp = client.post("/api/events", json=big_payload)
+    assert resp.status_code == 413
+    assert "too large" in resp.get_json()["error"].lower()
+
+
+def test_list_events_limit_clamped_to_max(client, monkeypatch):
+    monkeypatch.setattr("app.MAX_PAGE_LIMIT", 3)
+    for i in range(10):
+        client.post("/api/events", json={"event_name": f"ev_{i}"})
+    resp = client.get("/api/events?limit=100")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["limit"] == 3
+    assert data["count"] == 3
+    assert data["total"] == 10
+
+
 def test_events_store_within_capacity(client, monkeypatch):
     monkeypatch.setattr("app.MAX_EVENTS", 10)
     for i in range(3):
