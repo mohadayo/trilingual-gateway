@@ -15,6 +15,9 @@ events_store: list[dict] = []
 
 DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
 MAX_EVENTS = int(os.getenv("MAX_EVENTS", "10000"))
+MAX_PAGE_LIMIT = int(os.getenv("MAX_PAGE_LIMIT", "500"))
+MAX_PAYLOAD_SIZE = int(os.getenv("MAX_PAYLOAD_SIZE", str(1024 * 1024)))
+MAX_EVENT_NAME_LENGTH = int(os.getenv("MAX_EVENT_NAME_LENGTH", "200"))
 
 
 @app.route("/health")
@@ -24,14 +27,43 @@ def health():
 
 @app.route("/api/events", methods=["POST"])
 def track_event():
-    data = request.get_json()
+    content_length = request.content_length or 0
+    if content_length > MAX_PAYLOAD_SIZE:
+        logger.warning("Payload too large: %d bytes (max %d)", content_length, MAX_PAYLOAD_SIZE)
+        return jsonify({"error": "Payload too large", "max_bytes": MAX_PAYLOAD_SIZE}), 413
+
+    data = request.get_json(silent=True)
     if not data or "event_name" not in data:
         logger.warning("Invalid event payload received")
         return jsonify({"error": "event_name is required"}), 400
 
+    event_name = data["event_name"]
+    if not isinstance(event_name, str):
+        logger.warning("event_name has invalid type: %s", type(event_name).__name__)
+        return jsonify({"error": "event_name must be a string"}), 400
+
+    normalized_name = event_name.strip()
+    if not normalized_name:
+        logger.warning("event_name is blank")
+        return jsonify({"error": "event_name must not be blank"}), 400
+
+    if len(normalized_name) > MAX_EVENT_NAME_LENGTH:
+        logger.warning("event_name too long: %d chars (max %d)", len(normalized_name), MAX_EVENT_NAME_LENGTH)
+        return jsonify({
+            "error": "event_name is too long",
+            "max_length": MAX_EVENT_NAME_LENGTH,
+        }), 400
+
+    properties = data.get("properties", {})
+    if properties is None:
+        properties = {}
+    if not isinstance(properties, dict):
+        logger.warning("properties has invalid type: %s", type(properties).__name__)
+        return jsonify({"error": "properties must be an object"}), 400
+
     event = {
-        "event_name": data["event_name"],
-        "properties": data.get("properties", {}),
+        "event_name": normalized_name,
+        "properties": properties,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     events_store.append(event)
@@ -53,6 +85,8 @@ def list_events():
 
     if limit < 0:
         limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
     if offset < 0:
         offset = 0
 
