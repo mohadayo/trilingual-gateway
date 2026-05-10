@@ -240,3 +240,68 @@ def test_events_store_within_capacity(client, monkeypatch):
     resp = client.get("/api/events")
     data = resp.get_json()
     assert data["total"] == 3
+
+
+def test_list_events_filter_since(client):
+    # Inject events with controlled timestamps
+    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    resp = client.get("/api/events?since=2024-01-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    names = sorted(e["event_name"] for e in data["events"])
+    assert names == ["mid", "new"]
+
+
+def test_list_events_filter_until(client):
+    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    resp = client.get("/api/events?until=2024-06-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    names = sorted(e["event_name"] for e in data["events"])
+    assert names == ["mid", "old"]
+
+
+def test_list_events_filter_since_and_until(client):
+    events_store.append({"event_name": "a", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "b", "properties": {}, "timestamp": "2025-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "c", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    resp = client.get("/api/events?since=2024-06-01T00:00:00Z&until=2025-06-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert data["events"][0]["event_name"] == "b"
+
+
+def test_list_events_rejects_invalid_since(client):
+    resp = client.get("/api/events?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_list_events_rejects_invalid_until(client):
+    resp = client.get("/api/events?until=foo")
+    assert resp.status_code == 400
+    assert "until" in resp.get_json()["error"]
+
+
+def test_list_events_rejects_since_greater_than_until(client):
+    resp = client.get("/api/events?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_list_events_combines_event_name_and_time_range(client):
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "scroll", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    resp = client.get("/api/events?event_name=click&since=2025-01-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert data["events"][0]["event_name"] == "click"
