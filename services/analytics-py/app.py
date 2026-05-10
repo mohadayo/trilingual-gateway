@@ -77,11 +77,28 @@ def track_event():
     return jsonify({"message": "Event tracked", "event": event}), 201
 
 
+def _parse_iso_datetime(value: str, name: str) -> datetime:
+    raw = value.strip()
+    if not raw:
+        raise ValueError(f"'{name}' must not be blank")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"'{name}' must be an ISO8601 datetime: {exc}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 @app.route("/api/events", methods=["GET"])
 def list_events():
     event_name = request.args.get("event_name")
     limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
     offset = request.args.get("offset", 0, type=int)
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
 
     if limit < 0:
         limit = DEFAULT_PAGE_LIMIT
@@ -90,9 +107,39 @@ def list_events():
     if offset < 0:
         offset = 0
 
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
     filtered = events_store
     if event_name:
-        filtered = [e for e in events_store if e["event_name"] == event_name]
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    if since is not None or until is not None:
+        kept = []
+        for e in filtered:
+            try:
+                ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError, KeyError):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if since is not None and ts < since:
+                continue
+            if until is not None and ts > until:
+                continue
+            kept.append(e)
+        filtered = kept
 
     total = len(filtered)
     paginated = filtered[offset:offset + limit]
