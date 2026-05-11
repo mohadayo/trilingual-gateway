@@ -28,6 +28,67 @@ const MAX_EMAIL_LENGTH = 254; // RFC 5321
 const ALLOWED_ROLES = new Set(["user", "admin", "moderator"]);
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+const USERS_DEFAULT_LIMIT = Math.max(
+  1,
+  parseInt(process.env.USERS_DEFAULT_LIMIT || "50", 10) || 50,
+);
+const USERS_MAX_LIMIT = Math.max(
+  USERS_DEFAULT_LIMIT,
+  parseInt(process.env.USERS_MAX_LIMIT || "200", 10) || 200,
+);
+
+function parseListQuery(
+  query: Record<string, unknown>,
+): { ok: true; limit: number; offset: number; role: string | null }
+  | { ok: false; error: string } {
+  let limit = USERS_DEFAULT_LIMIT;
+  let offset = 0;
+  let role: string | null = null;
+
+  if (query.limit !== undefined) {
+    const raw = String(query.limit);
+    if (!/^-?\d+$/.test(raw)) {
+      return { ok: false, error: "limit must be an integer" };
+    }
+    const n = parseInt(raw, 10);
+    if (n < 1) {
+      return { ok: false, error: "limit must be >= 1" };
+    }
+    if (n > USERS_MAX_LIMIT) {
+      return {
+        ok: false,
+        error: `limit must be <= ${USERS_MAX_LIMIT}`,
+      };
+    }
+    limit = n;
+  }
+
+  if (query.offset !== undefined) {
+    const raw = String(query.offset);
+    if (!/^-?\d+$/.test(raw)) {
+      return { ok: false, error: "offset must be an integer" };
+    }
+    const n = parseInt(raw, 10);
+    if (n < 0) {
+      return { ok: false, error: "offset must be >= 0" };
+    }
+    offset = n;
+  }
+
+  if (query.role !== undefined) {
+    const r = String(query.role).trim();
+    if (!ALLOWED_ROLES.has(r)) {
+      return {
+        ok: false,
+        error: `role must be one of: ${Array.from(ALLOWED_ROLES).join(", ")}`,
+      };
+    }
+    role = r;
+  }
+
+  return { ok: true, limit, offset, role };
+}
+
 interface ValidatedInput {
   username?: string;
   email?: string;
@@ -144,9 +205,28 @@ app.post("/api/users", (req: Request, res: Response) => {
   res.status(201).json(user);
 });
 
-app.get("/api/users", (_req: Request, res: Response) => {
-  const list = Array.from(users.values());
-  res.json({ users: list, count: list.length });
+app.get("/api/users", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { limit, offset, role } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  const total = list.length;
+  const page = list.slice(offset, offset + limit);
+  res.json({
+    users: page,
+    count: page.length,
+    total,
+    limit,
+    offset,
+  });
 });
 
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
