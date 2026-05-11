@@ -137,7 +137,7 @@ describe("POST /api/users", () => {
 });
 
 describe("GET /api/users", () => {
-  it("returns all users", async () => {
+  it("returns all users with pagination metadata", async () => {
     await request(app)
       .post("/api/users")
       .send({ username: "a", email: "a@example.com" });
@@ -147,7 +147,57 @@ describe("GET /api/users", () => {
     const res = await request(app).get("/api/users");
     expect(res.status).toBe(200);
     expect(res.body.count).toBe(2);
+    expect(res.body.total).toBe(2);
+    expect(res.body.limit).toBeGreaterThanOrEqual(2);
+    expect(res.body.offset).toBe(0);
     expect(res.body.users).toHaveLength(2);
+  });
+
+  it("paginates with limit and offset", async () => {
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .post("/api/users")
+        .send({ username: `u${i}`, email: `u${i}@example.com` });
+    }
+    const res = await request(app).get("/api/users?limit=2&offset=1");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(5);
+    expect(res.body.limit).toBe(2);
+    expect(res.body.offset).toBe(1);
+    expect(res.body.users).toHaveLength(2);
+  });
+
+  it("filters by role", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "a", email: "a@example.com", role: "admin" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "b", email: "b@example.com" });
+    const res = await request(app).get("/api/users?role=admin");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.users[0].role).toBe("admin");
+  });
+
+  it("rejects invalid limit", async () => {
+    const res = await request(app).get("/api/users?limit=0");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects non-integer offset", async () => {
+    const res = await request(app).get("/api/users?offset=abc");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects unknown role", async () => {
+    const res = await request(app).get("/api/users?role=ceo");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects limit above the configured maximum", async () => {
+    const res = await request(app).get("/api/users?limit=999999");
+    expect(res.status).toBe(400);
   });
 });
 
