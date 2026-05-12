@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func resetMessages() {
@@ -456,5 +457,33 @@ func TestMessagesPaginationWithChannelFilter(t *testing.T) {
 	}
 	if int(resp["count"].(float64)) != 3 {
 		t.Fatalf("expected count 3, got %v", resp["count"])
+	}
+}
+
+func TestEnvSeconds_OverrideAndFallback(t *testing.T) {
+	const key = "TEST_TRIGW_PROCESSOR_ENV_SECONDS"
+
+	if got := envSeconds(key, 7*time.Second); got != 7*time.Second {
+		t.Fatalf("expected fallback 7s when unset, got %v", got)
+	}
+
+	t.Setenv(key, "42")
+	if got := envSeconds(key, 7*time.Second); got != 42*time.Second {
+		t.Fatalf("expected override 42s, got %v", got)
+	}
+
+	t.Setenv(key, "not-a-number")
+	if got := envSeconds(key, 7*time.Second); got != 7*time.Second {
+		t.Fatalf("expected fallback for invalid value, got %v", got)
+	}
+
+	t.Setenv(key, "0")
+	if got := envSeconds(key, 7*time.Second); got != 7*time.Second {
+		t.Fatalf("expected fallback for zero, got %v", got)
+	}
+
+	t.Setenv(key, "-5")
+	if got := envSeconds(key, 7*time.Second); got != 7*time.Second {
+		t.Fatalf("expected fallback for negative, got %v", got)
 	}
 }
