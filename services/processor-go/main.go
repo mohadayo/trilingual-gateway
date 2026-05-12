@@ -34,12 +34,16 @@ type ErrorResponse struct {
 }
 
 var (
-	messages         []Message
-	mu               sync.RWMutex
-	logger           *log.Logger
-	maxMessages      int
-	defaultPageLimit int
-	maxPageLimit     int
+	messages          []Message
+	mu                sync.RWMutex
+	logger            *log.Logger
+	maxMessages       int
+	defaultPageLimit  int
+	maxPageLimit      int
+	readHeaderTimeout time.Duration
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	idleTimeout       time.Duration
 )
 
 func envInt(key string, fallback int) int {
@@ -51,11 +55,24 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
+func envSeconds(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return fallback
+}
+
 func init() {
 	logger = log.New(os.Stdout, "[processor-go] ", log.LstdFlags)
 	maxMessages = envInt("MAX_MESSAGES", 10000)
 	defaultPageLimit = envInt("DEFAULT_PAGE_LIMIT", 50)
 	maxPageLimit = envInt("MAX_PAGE_LIMIT", 1000)
+	readHeaderTimeout = envSeconds("PROCESSOR_READ_HEADER_TIMEOUT", 5*time.Second)
+	readTimeout = envSeconds("PROCESSOR_READ_TIMEOUT", 15*time.Second)
+	writeTimeout = envSeconds("PROCESSOR_WRITE_TIMEOUT", 15*time.Second)
+	idleTimeout = envSeconds("PROCESSOR_IDLE_TIMEOUT", 60*time.Second)
 }
 
 func parsePagination(q map[string][]string) (limit, offset int) {
@@ -246,8 +263,12 @@ func main() {
 	mux.HandleFunc("/api/stats", statsHandler)
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	shutdownTimeout := 30 * time.Second
