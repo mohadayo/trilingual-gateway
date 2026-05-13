@@ -1,5 +1,6 @@
 import os
 import logging
+import threading
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 
@@ -12,12 +13,15 @@ logger = logging.getLogger("analytics")
 app = Flask(__name__)
 
 events_store: list[dict] = []
+events_lock = threading.Lock()
 
 DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
 MAX_EVENTS = int(os.getenv("MAX_EVENTS", "10000"))
 MAX_PAGE_LIMIT = int(os.getenv("MAX_PAGE_LIMIT", "500"))
 MAX_PAYLOAD_SIZE = int(os.getenv("MAX_PAYLOAD_SIZE", str(1024 * 1024)))
 MAX_EVENT_NAME_LENGTH = int(os.getenv("MAX_EVENT_NAME_LENGTH", "200"))
+ALLOWED_SORT_FIELDS = {"timestamp", "event_name"}
+ALLOWED_SORT_ORDERS = {"asc", "desc"}
 
 
 @app.route("/health")
@@ -66,12 +70,12 @@ def track_event():
         "properties": properties,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    events_store.append(event)
-
-    if len(events_store) > MAX_EVENTS:
-        removed = len(events_store) - MAX_EVENTS
-        del events_store[:removed]
-        logger.info("Evicted %d old events (store capped at %d)", removed, MAX_EVENTS)
+    with events_lock:
+        events_store.append(event)
+        if len(events_store) > MAX_EVENTS:
+            removed = len(events_store) - MAX_EVENTS
+            del events_store[:removed]
+            logger.info("Evicted %d old events (store capped at %d)", removed, MAX_EVENTS)
 
     logger.info("Tracked event: %s", event["event_name"])
     return jsonify({"message": "Event tracked", "event": event}), 201
@@ -92,6 +96,25 @@ def _parse_iso_datetime(value: str, name: str) -> datetime:
     return dt
 
 
+def _filter_events_by_time(events: list[dict], since: datetime | None, until: datetime | None) -> list[dict]:
+    if since is None and until is None:
+        return events
+    kept = []
+    for e in events:
+        try:
+            ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError, KeyError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if since is not None and ts < since:
+            continue
+        if until is not None and ts > until:
+            continue
+        kept.append(e)
+    return kept
+
+
 @app.route("/api/events", methods=["GET"])
 def list_events():
     event_name = request.args.get("event_name")
@@ -99,6 +122,21 @@ def list_events():
     offset = request.args.get("offset", 0, type=int)
     since_raw = request.args.get("since")
     until_raw = request.args.get("until")
+    sort_field = request.args.get("sort", "timestamp")
+    sort_order = request.args.get("order", "asc")
+
+    if sort_field not in ALLOWED_SORT_FIELDS:
+        logger.warning("Invalid sort field: %s", sort_field)
+        return jsonify({
+            "error": "Invalid sort field",
+            "allowed": sorted(ALLOWED_SORT_FIELDS),
+        }), 400
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
 
     if limit < 0:
         limit = DEFAULT_PAGE_LIMIT
@@ -122,29 +160,27 @@ def list_events():
         logger.warning("Invalid range: since=%s > until=%s", since, until)
         return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
 
-    filtered = events_store
+    with events_lock:
+        filtered = list(events_store)
     if event_name:
         filtered = [e for e in filtered if e["event_name"] == event_name]
-    if since is not None or until is not None:
-        kept = []
-        for e in filtered:
-            try:
-                ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
-            except (ValueError, AttributeError, KeyError):
-                continue
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if since is not None and ts < since:
-                continue
-            if until is not None and ts > until:
-                continue
-            kept.append(e)
-        filtered = kept
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    reverse = sort_order == "desc"
+    filtered.sort(key=lambda e: e.get(sort_field, ""), reverse=reverse)
 
     total = len(filtered)
     paginated = filtered[offset:offset + limit]
 
-    return jsonify({"events": paginated, "count": len(paginated), "total": total, "limit": limit, "offset": offset})
+    return jsonify({
+        "events": paginated,
+        "count": len(paginated),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort_field,
+        "order": sort_order,
+    })
 
 
 @app.route("/api/events", methods=["DELETE"])
@@ -154,9 +190,10 @@ def delete_events():
         logger.warning("Delete request missing event_name parameter")
         return jsonify({"error": "event_name query parameter is required"}), 400
 
-    before_count = len(events_store)
-    events_store[:] = [e for e in events_store if e["event_name"] != event_name]
-    deleted_count = before_count - len(events_store)
+    with events_lock:
+        before_count = len(events_store)
+        events_store[:] = [e for e in events_store if e["event_name"] != event_name]
+        deleted_count = before_count - len(events_store)
 
     if deleted_count == 0:
         logger.info("No events found for deletion: %s", event_name)
@@ -168,12 +205,37 @@ def delete_events():
 
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
+    event_name = request.args.get("event_name")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on summary: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on summary: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_time(filtered, since, until)
+
     summary: dict[str, int] = {}
-    for event in events_store:
+    for event in filtered:
         name = event["event_name"]
         summary[name] = summary.get(name, 0) + 1
     logger.info("Summary requested, %d unique event types", len(summary))
-    return jsonify({"summary": summary, "total_events": len(events_store)})
+    return jsonify({"summary": summary, "total_events": len(filtered)})
 
 
 if __name__ == "__main__":
