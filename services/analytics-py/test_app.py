@@ -305,3 +305,99 @@ def test_list_events_combines_event_name_and_time_range(client):
     data = resp.get_json()
     assert data["total"] == 1
     assert data["events"][0]["event_name"] == "click"
+
+
+def test_list_events_sort_default(client):
+    events_store.append({"event_name": "b", "properties": {}, "timestamp": "2024-02-01T00:00:00+00:00"})
+    events_store.append({"event_name": "a", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "c", "properties": {}, "timestamp": "2024-03-01T00:00:00+00:00"})
+    resp = client.get("/api/events")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [e["event_name"] for e in data["events"]] == ["a", "b", "c"]
+    assert data["sort"] == "timestamp"
+    assert data["order"] == "asc"
+
+
+def test_list_events_sort_desc(client):
+    events_store.append({"event_name": "a", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "b", "properties": {}, "timestamp": "2024-02-01T00:00:00+00:00"})
+    events_store.append({"event_name": "c", "properties": {}, "timestamp": "2024-03-01T00:00:00+00:00"})
+    resp = client.get("/api/events?order=desc")
+    data = resp.get_json()
+    assert [e["event_name"] for e in data["events"]] == ["c", "b", "a"]
+
+
+def test_list_events_sort_by_event_name(client):
+    events_store.append({"event_name": "zeta", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "alpha", "properties": {}, "timestamp": "2024-02-01T00:00:00+00:00"})
+    resp = client.get("/api/events?sort=event_name")
+    names = [e["event_name"] for e in resp.get_json()["events"]]
+    assert names == ["alpha", "zeta"]
+
+
+def test_list_events_invalid_sort_field(client):
+    resp = client.get("/api/events?sort=bogus")
+    assert resp.status_code == 400
+    assert "allowed" in resp.get_json()
+
+
+def test_list_events_invalid_sort_order(client):
+    resp = client.get("/api/events?order=sideways")
+    assert resp.status_code == 400
+    assert "allowed" in resp.get_json()
+
+
+def test_summary_filter_by_event_name(client):
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-02T00:00:00+00:00"})
+    events_store.append({"event_name": "scroll", "properties": {}, "timestamp": "2024-01-03T00:00:00+00:00"})
+    resp = client.get("/api/events/summary?event_name=click")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["summary"] == {"click": 2}
+    assert data["total_events"] == 2
+
+
+def test_summary_filter_by_time_range(client):
+    events_store.append({"event_name": "x", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "x", "properties": {}, "timestamp": "2024-06-01T00:00:00+00:00"})
+    events_store.append({"event_name": "x", "properties": {}, "timestamp": "2024-12-01T00:00:00+00:00"})
+    resp = client.get("/api/events/summary?since=2024-04-01T00:00:00Z&until=2024-09-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_events"] == 1
+
+
+def test_summary_invalid_since(client):
+    resp = client.get("/api/events/summary?since=notanumber")
+    assert resp.status_code == 400
+
+
+def test_summary_until_before_since(client):
+    resp = client.get("/api/events/summary?since=2024-06-01T00:00:00Z&until=2024-01-01T00:00:00Z")
+    assert resp.status_code == 400
+
+
+def test_events_lock_concurrent_writes():
+    from app import events_store as store, events_lock
+    import threading as _threading
+
+    store.clear()
+
+    def writer(tag):
+        for i in range(40):
+            with events_lock:
+                store.append({
+                    "event_name": f"{tag}-{i}",
+                    "properties": {},
+                    "timestamp": "2024-01-01T00:00:00+00:00",
+                })
+
+    threads = [_threading.Thread(target=writer, args=(f"t{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(store) == 4 * 40
