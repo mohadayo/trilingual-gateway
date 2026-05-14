@@ -343,3 +343,137 @@ describe("DELETE /api/users/:id", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("GET /api/users search and sort", () => {
+  async function seed(): Promise<void> {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "alice", email: "alice@example.com" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "bob", email: "bob@example.com", role: "admin" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "charlie", email: "charlie@elsewhere.org" });
+  }
+
+  it("filters by case-insensitive substring on username", async () => {
+    await seed();
+    const res = await request(app).get("/api/users?q=BOB");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.users[0].username).toBe("bob");
+  });
+
+  it("filters by substring on email", async () => {
+    await seed();
+    const res = await request(app).get("/api/users?q=elsewhere");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.users[0].username).toBe("charlie");
+  });
+
+  it("matches against both username and email", async () => {
+    await seed();
+    const res = await request(app).get("/api/users?q=example.com");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("ignores blank q parameter", async () => {
+    await seed();
+    const res = await request(app).get("/api/users?q=%20%20");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3);
+  });
+
+  it("rejects q exceeding max length", async () => {
+    const res = await request(app).get(`/api/users?q=${"a".repeat(101)}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("q must be at most");
+  });
+
+  it("returns sort and order in response", async () => {
+    await seed();
+    const res = await request(app).get("/api/users");
+    expect(res.body.sort).toBe("created_at");
+    expect(res.body.order).toBe("asc");
+  });
+
+  it("sorts by username asc", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "zoe", email: "zoe@example.com" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "amy", email: "amy@example.com" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "max", email: "max@example.com" });
+    const res = await request(app).get("/api/users?sort=username");
+    const names = res.body.users.map((u: { username: string }) => u.username);
+    expect(names).toEqual(["amy", "max", "zoe"]);
+  });
+
+  it("sorts by username desc", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "zoe", email: "zoe@example.com" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "amy", email: "amy@example.com" });
+    const res = await request(app).get("/api/users?sort=username&order=desc");
+    const names = res.body.users.map((u: { username: string }) => u.username);
+    expect(names).toEqual(["zoe", "amy"]);
+  });
+
+  it("sorts by email", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u1", email: "z@example.com" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u2", email: "a@example.com" });
+    const res = await request(app).get("/api/users?sort=email");
+    const emails = res.body.users.map((u: { email: string }) => u.email);
+    expect(emails).toEqual(["a@example.com", "z@example.com"]);
+  });
+
+  it("rejects invalid sort field", async () => {
+    const res = await request(app).get("/api/users?sort=bogus");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("sort must be one of");
+  });
+
+  it("rejects invalid order", async () => {
+    const res = await request(app).get("/api/users?order=sideways");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("order must be one of");
+  });
+
+  it("combines role filter with q search", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "admin1", email: "admin1@x.com", role: "admin" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "user1", email: "admin@y.com" });
+    const res = await request(app).get("/api/users?role=admin&q=admin");
+    expect(res.body.total).toBe(1);
+    expect(res.body.users[0].username).toBe("admin1");
+  });
+
+  it("paginates sorted results", async () => {
+    for (const name of ["alpha", "bravo", "charlie", "delta", "echo"]) {
+      await request(app)
+        .post("/api/users")
+        .send({ username: name, email: `${name}@example.com` });
+    }
+    const res = await request(app).get(
+      "/api/users?sort=username&limit=2&offset=1",
+    );
+    const names = res.body.users.map((u: { username: string }) => u.username);
+    expect(names).toEqual(["bravo", "charlie"]);
+    expect(res.body.total).toBe(5);
+  });
+});

@@ -36,14 +36,44 @@ const USERS_MAX_LIMIT = Math.max(
   USERS_DEFAULT_LIMIT,
   parseInt(process.env.USERS_MAX_LIMIT || "200", 10) || 200,
 );
+const MAX_SEARCH_LENGTH = parseInt(
+  process.env.MAX_SEARCH_LENGTH || "100",
+  10,
+);
+
+type SortField =
+  | "created_at"
+  | "updated_at"
+  | "username"
+  | "email"
+  | "role";
+type SortOrder = "asc" | "desc";
+const ALLOWED_SORT_FIELDS = new Set<SortField>([
+  "created_at",
+  "updated_at",
+  "username",
+  "email",
+  "role",
+]);
+const ALLOWED_SORT_ORDERS = new Set<SortOrder>(["asc", "desc"]);
 
 function parseListQuery(
   query: Record<string, unknown>,
-): { ok: true; limit: number; offset: number; role: string | null }
-  | { ok: false; error: string } {
+): {
+  ok: true;
+  limit: number;
+  offset: number;
+  role: string | null;
+  q: string | null;
+  sort: SortField;
+  order: SortOrder;
+} | { ok: false; error: string } {
   let limit = USERS_DEFAULT_LIMIT;
   let offset = 0;
   let role: string | null = null;
+  let q: string | null = null;
+  let sort: SortField = "created_at";
+  let order: SortOrder = "asc";
 
   if (query.limit !== undefined) {
     const raw = String(query.limit);
@@ -86,7 +116,43 @@ function parseListQuery(
     role = r;
   }
 
-  return { ok: true, limit, offset, role };
+  if (query.q !== undefined) {
+    const raw = String(query.q);
+    if (raw.length > MAX_SEARCH_LENGTH) {
+      return {
+        ok: false,
+        error: `q must be at most ${MAX_SEARCH_LENGTH} characters`,
+      };
+    }
+    const trimmed = raw.trim();
+    if (trimmed.length > 0) {
+      q = trimmed.toLowerCase();
+    }
+  }
+
+  if (query.sort !== undefined) {
+    const raw = String(query.sort);
+    if (!ALLOWED_SORT_FIELDS.has(raw as SortField)) {
+      return {
+        ok: false,
+        error: `sort must be one of: ${Array.from(ALLOWED_SORT_FIELDS).join(", ")}`,
+      };
+    }
+    sort = raw as SortField;
+  }
+
+  if (query.order !== undefined) {
+    const raw = String(query.order);
+    if (!ALLOWED_SORT_ORDERS.has(raw as SortOrder)) {
+      return {
+        ok: false,
+        error: `order must be one of: ${Array.from(ALLOWED_SORT_ORDERS).join(", ")}`,
+      };
+    }
+    order = raw as SortOrder;
+  }
+
+  return { ok: true, limit, offset, role, q, sort, order };
 }
 
 interface ValidatedInput {
@@ -212,12 +278,29 @@ app.get("/api/users", (req: Request, res: Response) => {
     res.status(400).json({ error: parsed.error });
     return;
   }
-  const { limit, offset, role } = parsed;
+  const { limit, offset, role, q, sort, order } = parsed;
 
   let list = Array.from(users.values());
   if (role !== null) {
     list = list.filter((u) => u.role === role);
   }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+
+  const reverse = order === "desc";
+  list.sort((a, b) => {
+    const av = a[sort];
+    const bv = b[sort];
+    if (av < bv) return reverse ? 1 : -1;
+    if (av > bv) return reverse ? -1 : 1;
+    return 0;
+  });
+
   const total = list.length;
   const page = list.slice(offset, offset + limit);
   res.json({
@@ -226,6 +309,8 @@ app.get("/api/users", (req: Request, res: Response) => {
     total,
     limit,
     offset,
+    sort,
+    order,
   });
 });
 
