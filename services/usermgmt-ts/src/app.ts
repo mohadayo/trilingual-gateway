@@ -212,7 +212,7 @@ function validateUserInput(
     if (!EMAIL_REGEX.test(trimmed)) {
       return { ok: false, error: "email format is invalid" };
     }
-    out.email = trimmed;
+    out.email = trimmed.toLowerCase();
   }
 
   if (hasRole) {
