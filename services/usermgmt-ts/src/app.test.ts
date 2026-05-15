@@ -134,6 +134,24 @@ describe("POST /api/users", () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/at most/i);
   });
+
+  it("normalizes email to lowercase on create", async () => {
+    const res = await request(app)
+      .post("/api/users")
+      .send({ username: "case", email: "Case.User@Example.COM" });
+    expect(res.status).toBe(201);
+    expect(res.body.email).toBe("case.user@example.com");
+  });
+
+  it("rejects duplicate email differing only in case", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "first", email: "Same@Example.com" });
+    const res = await request(app)
+      .post("/api/users")
+      .send({ username: "second", email: "SAME@example.COM" });
+    expect(res.status).toBe(409);
+  });
 });
 
 describe("GET /api/users", () => {
@@ -275,6 +293,30 @@ describe("PUT /api/users/:id", () => {
       .send({ email: "same@example.com", username: "updated" });
     expect(res.status).toBe(200);
     expect(res.body.username).toBe("updated");
+  });
+
+  it("rejects duplicate email on update even with different case", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u1", email: "Owner@Example.com" });
+    const created = await request(app)
+      .post("/api/users")
+      .send({ username: "u2", email: "other@example.com" });
+    const res = await request(app)
+      .put(`/api/users/${created.body.id}`)
+      .send({ email: "OWNER@example.com" });
+    expect(res.status).toBe(409);
+  });
+
+  it("normalizes email to lowercase on update", async () => {
+    const created = await request(app)
+      .post("/api/users")
+      .send({ username: "u", email: "old@example.com" });
+    const res = await request(app)
+      .put(`/api/users/${created.body.id}`)
+      .send({ email: "New.Mixed@Example.COM" });
+    expect(res.status).toBe(200);
+    expect(res.body.email).toBe("new.mixed@example.com");
   });
 
   it("returns 404 for unknown id", async () => {
