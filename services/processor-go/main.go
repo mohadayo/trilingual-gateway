@@ -9,11 +9,39 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+var allowedMessageSortFields = map[string]bool{
+	"created_at": true,
+	"channel":    true,
+	"id":         true,
+}
+
+var allowedMessageSortOrders = map[string]bool{"asc": true, "desc": true}
+
+func parseTimeQuery(value string) (time.Time, error) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return time.Time{}, fmt.Errorf("must not be blank")
+	}
+	if strings.HasSuffix(v, "Z") {
+		v = v[:len(v)-1] + "+00:00"
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err == nil {
+		return t.UTC(), nil
+	}
+	if t2, err2 := time.Parse(time.RFC3339, v); err2 == nil {
+		return t2.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("must be an ISO 8601 / RFC 3339 datetime: %s", err.Error())
+}
 
 type Message struct {
 	ID        string    `json:"id"`
@@ -186,19 +214,101 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 	channel := query.Get("channel")
 	limit, offset := parsePagination(query)
 
+	sortField := query.Get("sort")
+	if sortField == "" {
+		sortField = "created_at"
+	}
+	if !allowedMessageSortFields[sortField] {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "sort must be one of: channel, created_at, id"})
+		return
+	}
+
+	sortOrder := query.Get("order")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	if !allowedMessageSortOrders[sortOrder] {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "order must be one of: asc, desc"})
+		return
+	}
+
+	var since, until *time.Time
+	if raw := query.Get("since"); raw != "" {
+		t, err := parseTimeQuery(raw)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse{
+				Error: fmt.Sprintf("query parameter 'since' %s", err.Error()),
+			})
+			return
+		}
+		since = &t
+	}
+	if raw := query.Get("until"); raw != "" {
+		t, err := parseTimeQuery(raw)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse{
+				Error: fmt.Sprintf("query parameter 'until' %s", err.Error()),
+			})
+			return
+		}
+		until = &t
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{
+			Error: "query parameter 'until' must be greater than or equal to 'since'",
+		})
+		return
+	}
+
 	mu.RLock()
 	defer mu.RUnlock()
 
-	var filtered []Message
-	if channel != "" {
-		for _, m := range messages {
-			if m.Channel == channel {
-				filtered = append(filtered, m)
-			}
+	filtered := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if channel != "" && m.Channel != channel {
+			continue
 		}
-	} else {
-		filtered = messages
+		if since != nil && m.CreatedAt.Before(*since) {
+			continue
+		}
+		if until != nil && m.CreatedAt.After(*until) {
+			continue
+		}
+		filtered = append(filtered, m)
 	}
+
+	reverse := sortOrder == "desc"
+	sort.SliceStable(filtered, func(i, j int) bool {
+		a, b := filtered[i], filtered[j]
+		switch sortField {
+		case "created_at":
+			if reverse {
+				return a.CreatedAt.After(b.CreatedAt)
+			}
+			return a.CreatedAt.Before(b.CreatedAt)
+		case "channel":
+			if reverse {
+				return a.Channel > b.Channel
+			}
+			return a.Channel < b.Channel
+		case "id":
+			if reverse {
+				return a.ID > b.ID
+			}
+			return a.ID < b.ID
+		}
+		return false
+	})
 
 	total := len(filtered)
 	start := offset
@@ -221,6 +331,8 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 		"total":    total,
 		"limit":    limit,
 		"offset":   offset,
+		"sort":     sortField,
+		"order":    sortOrder,
 	})
 }
 

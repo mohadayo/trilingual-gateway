@@ -460,6 +460,139 @@ func TestMessagesPaginationWithChannelFilter(t *testing.T) {
 	}
 }
 
+func TestMessagesSinceUntilFilter(t *testing.T) {
+	resetMessages()
+
+	now := time.Now().UTC()
+	mu.Lock()
+	messages = []Message{
+		{ID: "id-old", Channel: "p", Payload: "old", Processed: true, CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "id-mid", Channel: "p", Payload: "mid", Processed: true, CreatedAt: now.Add(-1 * time.Hour)},
+		{ID: "id-new", Channel: "p", Payload: "new", Processed: true, CreatedAt: now},
+	}
+	mu.Unlock()
+
+	since := now.Add(-90 * time.Minute).Format(time.RFC3339Nano)
+	until := now.Add(-30 * time.Minute).Format(time.RFC3339Nano)
+	url := fmt.Sprintf("/api/messages?since=%s&until=%s", since, until)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total"].(float64)) != 1 {
+		t.Fatalf("expected total 1, got %v", resp["total"])
+	}
+	msgs := resp["messages"].([]interface{})
+	first := msgs[0].(map[string]interface{})
+	if first["id"] != "id-mid" {
+		t.Fatalf("expected id-mid, got %v", first["id"])
+	}
+}
+
+func TestMessagesInvalidSinceUntil(t *testing.T) {
+	resetMessages()
+	cases := []struct {
+		name string
+		q    string
+	}{
+		{"non-iso since", "/api/messages?since=abc"},
+		{"non-iso until", "/api/messages?until=xyz"},
+		{"until less than since", "/api/messages?since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z"},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, tc.q, nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d (%s)", tc.name, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestMessagesSortByCreatedAtDesc(t *testing.T) {
+	resetMessages()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mu.Lock()
+	messages = []Message{
+		{ID: "a", Channel: "p", Payload: "1", Processed: true, CreatedAt: base},
+		{ID: "b", Channel: "p", Payload: "2", Processed: true, CreatedAt: base.Add(2 * time.Hour)},
+		{ID: "c", Channel: "p", Payload: "3", Processed: true, CreatedAt: base.Add(1 * time.Hour)},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?sort=created_at&order=desc", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["sort"] != "created_at" || resp["order"] != "desc" {
+		t.Errorf("expected sort=created_at order=desc, got sort=%v order=%v", resp["sort"], resp["order"])
+	}
+	msgs := resp["messages"].([]interface{})
+	if msgs[0].(map[string]interface{})["id"] != "b" ||
+		msgs[1].(map[string]interface{})["id"] != "c" ||
+		msgs[2].(map[string]interface{})["id"] != "a" {
+		t.Errorf("unexpected order: %v, %v, %v",
+			msgs[0].(map[string]interface{})["id"],
+			msgs[1].(map[string]interface{})["id"],
+			msgs[2].(map[string]interface{})["id"])
+	}
+}
+
+func TestMessagesSortByChannelAsc(t *testing.T) {
+	resetMessages()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mu.Lock()
+	messages = []Message{
+		{ID: "1", Channel: "charlie", Payload: "x", Processed: true, CreatedAt: base},
+		{ID: "2", Channel: "alpha", Payload: "y", Processed: true, CreatedAt: base},
+		{ID: "3", Channel: "bravo", Payload: "z", Processed: true, CreatedAt: base},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?sort=channel&order=asc", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	msgs := resp["messages"].([]interface{})
+	if msgs[0].(map[string]interface{})["channel"] != "alpha" ||
+		msgs[1].(map[string]interface{})["channel"] != "bravo" ||
+		msgs[2].(map[string]interface{})["channel"] != "charlie" {
+		t.Errorf("unexpected order")
+	}
+}
+
+func TestMessagesInvalidSort(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?sort=bogus", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesInvalidOrder(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages?order=sideways", nil)
+	w := httptest.NewRecorder()
+	messagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestEnvSeconds_OverrideAndFallback(t *testing.T) {
 	const key = "TEST_TRIGW_PROCESSOR_ENV_SECONDS"
 
