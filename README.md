@@ -93,6 +93,11 @@ curl http://localhost:8001/api/events/summary
 | GET | `/api/messages` | List messages (optional `?channel=` filter) |
 | GET | `/api/stats` | Message count per channel |
 
+**Validation rules (POST):**
+- `channel`: 必須、トリム後 1〜`MAX_CHANNEL_LENGTH`（既定 256）文字
+- `payload`: 必須、トリム後 1〜`MAX_PAYLOAD_LENGTH`（既定 65536）文字
+- 空白のみの値や長さ超過は 400 を返す
+
 **Example:**
 ```bash
 # Publish a message
@@ -145,6 +150,8 @@ See [`.env.example`](.env.example) for all available configuration:
 | `MAX_PAGE_LIMIT` | 500 | analytics-py: `GET /api/events` の `limit` 上限 |
 | `MAX_PAYLOAD_SIZE` | 1048576 | analytics-py: リクエストボディの最大サイズ（バイト） |
 | `MAX_EVENT_NAME_LENGTH` | 200 | analytics-py: `event_name` の最大文字数 |
+| `MAX_CHANNEL_LENGTH` | 256 | processor-go: `POST /api/messages` の `channel` の最大文字数 |
+| `MAX_PAYLOAD_LENGTH` | 65536 | processor-go: `POST /api/messages` の `payload` の最大文字数 |
 | `PROCESSOR_PORT` | 8002 | Processor service port |
 | `PROCESSOR_READ_HEADER_TIMEOUT` | 5 | processor-go: ヘッダ読み取りタイムアウト秒（Slowloris 対策） |
 | `PROCESSOR_READ_TIMEOUT` | 15 | processor-go: 本文読み取りタイムアウト秒 |
