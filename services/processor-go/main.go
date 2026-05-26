@@ -68,6 +68,8 @@ var (
 	maxMessages       int
 	defaultPageLimit  int
 	maxPageLimit      int
+	maxChannelLength  int
+	maxPayloadLength  int
 	readHeaderTimeout time.Duration
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
@@ -97,6 +99,8 @@ func init() {
 	maxMessages = envInt("MAX_MESSAGES", 10000)
 	defaultPageLimit = envInt("DEFAULT_PAGE_LIMIT", 50)
 	maxPageLimit = envInt("MAX_PAGE_LIMIT", 1000)
+	maxChannelLength = envInt("MAX_CHANNEL_LENGTH", 256)
+	maxPayloadLength = envInt("MAX_PAYLOAD_LENGTH", 65536)
 	readHeaderTimeout = envSeconds("PROCESSOR_READ_HEADER_TIMEOUT", 5*time.Second)
 	readTimeout = envSeconds("PROCESSOR_READ_TIMEOUT", 15*time.Second)
 	writeTimeout = envSeconds("PROCESSOR_WRITE_TIMEOUT", 15*time.Second)
@@ -171,17 +175,36 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "invalid JSON body"})
 		return
 	}
-	if input.Channel == "" || input.Payload == "" {
+	// channel / payload をトリムし、空白のみの値や長さ超過を拒否する。
+	channel := strings.TrimSpace(input.Channel)
+	payload := strings.TrimSpace(input.Payload)
+	if channel == "" || payload == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "channel and payload are required"})
 		return
 	}
+	if len(channel) > maxChannelLength {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{
+			Error: fmt.Sprintf("channel must be at most %d characters", maxChannelLength),
+		})
+		return
+	}
+	if len(payload) > maxPayloadLength {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{
+			Error: fmt.Sprintf("payload must be at most %d characters", maxPayloadLength),
+		})
+		return
+	}
 
 	msg := Message{
 		ID:        newUUID(),
-		Channel:   input.Channel,
-		Payload:   input.Payload,
+		Channel:   channel,
+		Payload:   payload,
 		Processed: true,
 		CreatedAt: time.Now().UTC(),
 	}
