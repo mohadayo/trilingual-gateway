@@ -593,6 +593,115 @@ func TestMessagesInvalidOrder(t *testing.T) {
 	}
 }
 
+func TestPublishWhitespaceOnlyRejected(t *testing.T) {
+	resetMessages()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"blank channel", `{"channel":"   ","payload":"hello"}`},
+		{"blank payload", `{"channel":"alerts","payload":"   "}`},
+		{"both blank", `{"channel":" ","payload":"\t"}`},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBufferString(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d (%s)", tc.name, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestPublishTrimsChannelAndPayload(t *testing.T) {
+	resetMessages()
+
+	body := `{"channel":"  alerts  ","payload":"  hi  "}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	publishHandler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (%s)", w.Code, w.Body.String())
+	}
+	var msg Message
+	json.NewDecoder(w.Body).Decode(&msg)
+	if msg.Channel != "alerts" {
+		t.Errorf("expected trimmed channel 'alerts', got %q", msg.Channel)
+	}
+	if msg.Payload != "hi" {
+		t.Errorf("expected trimmed payload 'hi', got %q", msg.Payload)
+	}
+}
+
+func TestPublishChannelTooLong(t *testing.T) {
+	resetMessages()
+	oldMax := maxChannelLength
+	maxChannelLength = 8
+	defer func() { maxChannelLength = oldMax }()
+
+	body := fmt.Sprintf(`{"channel":"%s","payload":"ok"}`, strings.Repeat("c", 9))
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	publishHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp ErrorResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Error != "channel must be at most 8 characters" {
+		t.Errorf("unexpected error message: %q", resp.Error)
+	}
+}
+
+func TestPublishPayloadTooLong(t *testing.T) {
+	resetMessages()
+	oldMax := maxPayloadLength
+	maxPayloadLength = 10
+	defer func() { maxPayloadLength = oldMax }()
+
+	body := fmt.Sprintf(`{"channel":"ok","payload":"%s"}`, strings.Repeat("p", 11))
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	publishHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp ErrorResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Error != "payload must be at most 10 characters" {
+		t.Errorf("unexpected error message: %q", resp.Error)
+	}
+}
+
+func TestPublishAtLengthBoundaryAccepted(t *testing.T) {
+	resetMessages()
+	oldCh := maxChannelLength
+	oldPl := maxPayloadLength
+	maxChannelLength = 5
+	maxPayloadLength = 5
+	defer func() {
+		maxChannelLength = oldCh
+		maxPayloadLength = oldPl
+	}()
+
+	body := `{"channel":"abcde","payload":"12345"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	publishHandler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 at length boundary, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
 func TestEnvSeconds_OverrideAndFallback(t *testing.T) {
 	const key = "TEST_TRIGW_PROCESSOR_ENV_SECONDS"
 
