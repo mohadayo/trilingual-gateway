@@ -66,9 +66,18 @@ make lint          # Run all linters
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/events` | Track an event |
-| GET | `/api/events` | List events (`?event_name=`, `?limit=`, `?offset=`) |
+| GET | `/api/events` | List events with filtering / pagination / sorting (see params below) |
 | DELETE | `/api/events` | Delete events by name (`?event_name=` required) |
-| GET | `/api/events/summary` | Aggregated event counts by name |
+| GET | `/api/events/summary` | Aggregated event counts by name (filterable) |
+
+**`GET /api/events` query parameters:**
+- `event_name`: 完全一致でイベント名を絞り込み
+- `limit` / `offset`: ページネーション（`limit` 既定 `DEFAULT_PAGE_LIMIT`、上限 `MAX_PAGE_LIMIT`）
+- `since` / `until`: ISO 8601 / RFC 3339 タイムスタンプで期間絞り込み（`since` ≤ `until`）
+- `sort`: `timestamp`（既定）/ `event_name`
+- `order`: `asc`（既定）/ `desc`
+
+**`GET /api/events/summary` query parameters:** `event_name` / `since` / `until`（`/api/events` と同じ意味）
 
 **Example:**
 ```bash
@@ -90,8 +99,15 @@ curl http://localhost:8001/api/events/summary
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/messages` | Publish a message to a channel |
-| GET | `/api/messages` | List messages (optional `?channel=` filter) |
+| GET | `/api/messages` | List messages with filtering / pagination / sorting (see params below) |
 | GET | `/api/stats` | Message count per channel |
+
+**`GET /api/messages` query parameters:**
+- `channel`: 完全一致でチャンネルを絞り込み
+- `limit` / `offset`: ページネーション（`limit` 既定 `DEFAULT_PAGE_LIMIT`、上限 `MAX_PAGE_LIMIT`）
+- `since` / `until`: ISO 8601 / RFC 3339 タイムスタンプで期間絞り込み（`until` ≥ `since`）
+- `sort`: `created_at`（既定）/ `channel` / `id`
+- `order`: `asc`（既定）/ `desc`
 
 **Validation rules (POST):**
 - `channel`: 必須、トリム後 1〜`MAX_CHANNEL_LENGTH`（既定 256）文字
@@ -115,14 +131,21 @@ curl http://localhost:8002/api/stats
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/users` | Create a user |
-| GET | `/api/users` | List all users |
+| GET | `/api/users` | List users with filtering / search / pagination / sorting (see params below) |
 | GET | `/api/users/:id` | Get user by ID |
 | PUT | `/api/users/:id` | Update a user (partial update) |
 | DELETE | `/api/users/:id` | Delete a user |
 
+**`GET /api/users` query parameters:**
+- `limit` / `offset`: ページネーション（`limit` 既定 `USERS_DEFAULT_LIMIT`、上限 `USERS_MAX_LIMIT`）
+- `role`: `user` / `admin` / `moderator` で絞り込み
+- `q`: `username` / `email` の部分一致検索（大文字小文字を無視）
+- `sort`: `created_at`（既定）/ `updated_at` / `username` / `email` / `role`
+- `order`: `asc`（既定）/ `desc`
+
 **Validation rules (POST / PUT):**
 - `username`: 必須（POSTのみ）、トリム後 1〜`MAX_USERNAME_LENGTH`（既定 50）文字
-- `email`: 必須（POSTのみ）、トリム後 1〜254 文字、簡易メール形式チェック
+- `email`: 必須（POSTのみ）、トリム後 1〜254 文字、簡易メール形式チェック、**小文字に正規化**して保存（大文字違いの重複を防止）
 - `role`: 任意、`user` / `admin` / `moderator` のいずれか（既定: `user`）
 - 不正な値は 400 を返す
 
@@ -158,6 +181,10 @@ See [`.env.example`](.env.example) for all available configuration:
 | `PROCESSOR_WRITE_TIMEOUT` | 15 | processor-go: レスポンス書き込みタイムアウト秒 |
 | `PROCESSOR_IDLE_TIMEOUT` | 60 | processor-go: Keep-Alive アイドルタイムアウト秒 |
 | `USERMGMT_PORT` | 8003 | User management service port |
+| `MAX_USERNAME_LENGTH` | 50 | usermgmt-ts: `username` の最大文字数 |
+| `USERS_DEFAULT_LIMIT` | 50 | usermgmt-ts: `GET /api/users` の既定ページサイズ |
+| `USERS_MAX_LIMIT` | 200 | usermgmt-ts: `GET /api/users` の `limit` 上限 |
+| `MAX_SEARCH_LENGTH` | 100 | usermgmt-ts: `GET /api/users` の検索クエリ `q` の最大文字数 |
 
 ## CI/CD
 
