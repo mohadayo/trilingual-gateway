@@ -81,6 +81,33 @@ def track_event():
     return jsonify({"message": "Event tracked", "event": event}), 201
 
 
+def _normalize_q(raw: str | None) -> tuple[str | None, str | None]:
+    """`q` クエリパラメータを正規化する。
+
+    戻り値は (正規化後の値, エラーメッセージ)。
+    - None → (None, None) ：未指定（フィルタしない）
+    - trim 後が空 → (None, "q must not be blank") ：400 を返す対象
+    - 上限超過 → (None, ".. too long") ：400 を返す対象
+    - 正常 → (trimmed, None)
+    """
+    if raw is None:
+        return None, None
+    stripped = raw.strip()
+    if not stripped:
+        return None, "'q' must not be blank"
+    if len(stripped) > MAX_EVENT_NAME_LENGTH:
+        return None, f"'q' is too long (max {MAX_EVENT_NAME_LENGTH})"
+    return stripped, None
+
+
+def _filter_events_by_q(events: list[dict], q: str | None) -> list[dict]:
+    """`event_name` に対する大文字小文字無視の部分一致検索。"""
+    if not q:
+        return events
+    needle = q.lower()
+    return [e for e in events if needle in str(e.get("event_name", "")).lower()]
+
+
 def _parse_iso_datetime(value: str, name: str) -> datetime:
     raw = value.strip()
     if not raw:
@@ -118,12 +145,18 @@ def _filter_events_by_time(events: list[dict], since: datetime | None, until: da
 @app.route("/api/events", methods=["GET"])
 def list_events():
     event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
     limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
     offset = request.args.get("offset", 0, type=int)
     since_raw = request.args.get("since")
     until_raw = request.args.get("until")
     sort_field = request.args.get("sort", "timestamp")
     sort_order = request.args.get("order", "asc")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter: %s", q_err)
+        return jsonify({"error": q_err}), 400
 
     if sort_field not in ALLOWED_SORT_FIELDS:
         logger.warning("Invalid sort field: %s", sort_field)
@@ -164,6 +197,7 @@ def list_events():
         filtered = list(events_store)
     if event_name:
         filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
     filtered = _filter_events_by_time(filtered, since, until)
 
     reverse = sort_order == "desc"
@@ -206,8 +240,14 @@ def delete_events():
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
     since_raw = request.args.get("since")
     until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on summary: %s", q_err)
+        return jsonify({"error": q_err}), 400
 
     since = None
     until = None
@@ -228,6 +268,7 @@ def events_summary():
         filtered = list(events_store)
     if event_name:
         filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
     filtered = _filter_events_by_time(filtered, since, until)
 
     summary: dict[str, int] = {}
