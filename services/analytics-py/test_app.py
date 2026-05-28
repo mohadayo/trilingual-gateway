@@ -379,6 +379,71 @@ def test_summary_until_before_since(client):
     assert resp.status_code == 400
 
 
+def test_list_events_q_substring_case_insensitive(client):
+    client.post("/api/events", json={"event_name": "PageView"})
+    client.post("/api/events", json={"event_name": "page_click"})
+    client.post("/api/events", json={"event_name": "scroll"})
+    resp = client.get("/api/events?q=page")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    assert {e["event_name"] for e in data["events"]} == {"PageView", "page_click"}
+
+
+def test_list_events_q_no_match(client):
+    client.post("/api/events", json={"event_name": "page_view"})
+    resp = client.get("/api/events?q=nonexistent")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 0
+    assert data["count"] == 0
+
+
+def test_list_events_q_with_event_name_filter_is_and(client):
+    client.post("/api/events", json={"event_name": "page_view"})
+    client.post("/api/events", json={"event_name": "page_click"})
+    # event_name=page_view (完全一致) かつ q=click（部分一致） → 0 件
+    resp = client.get("/api/events?event_name=page_view&q=click")
+    assert resp.status_code == 200
+    assert resp.get_json()["total"] == 0
+    # event_name=page_view かつ q=page → 1 件（page_view のみ）
+    resp = client.get("/api/events?event_name=page_view&q=page")
+    assert resp.status_code == 200
+    assert resp.get_json()["total"] == 1
+
+
+def test_list_events_q_blank_returns_400(client):
+    resp = client.get("/api/events?q=%20%20")  # スペースのみ
+    assert resp.status_code == 400
+    assert "blank" in resp.get_json()["error"]
+
+
+def test_list_events_q_too_long_returns_400(client):
+    long_q = "x" * 201  # MAX_EVENT_NAME_LENGTH=200
+    resp = client.get(f"/api/events?q={long_q}")
+    assert resp.status_code == 400
+    assert "too long" in resp.get_json()["error"]
+
+
+def test_summary_q_substring_case_insensitive(client):
+    client.post("/api/events", json={"event_name": "PageView"})
+    client.post("/api/events", json={"event_name": "PageClick"})
+    client.post("/api/events", json={"event_name": "scroll"})
+    resp = client.get("/api/events/summary?q=page")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_events"] == 2
+    assert data["summary"]["PageView"] == 1
+    assert data["summary"]["PageClick"] == 1
+
+
+def test_summary_q_blank_returns_400(client):
+    resp = client.get("/api/events/summary?q=")
+    # 空文字は Flask が None として扱う可能性があるため、ここでは strip 後空 (%20) でテスト
+    # ただし "" は raw=="" なので _normalize_q では blank として 400
+    assert resp.status_code == 400
+
+
 def test_events_lock_concurrent_writes():
     from app import events_store as store, events_lock
     import threading as _threading
