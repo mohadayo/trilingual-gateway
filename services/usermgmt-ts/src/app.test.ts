@@ -1,5 +1,5 @@
 import request from "supertest";
-import { app, users } from "./app";
+import { app, users, MAX_REQUEST_BODY } from "./app";
 
 beforeEach(() => {
   users.clear();
@@ -517,5 +517,30 @@ describe("GET /api/users search and sort", () => {
     const names = res.body.users.map((u: { username: string }) => u.username);
     expect(names).toEqual(["bravo", "charlie"]);
     expect(res.body.total).toBe(5);
+  });
+});
+
+describe("JSON body size limit", () => {
+  it("uses the documented default of 100kb when env var is not set", () => {
+    // 既定値が明示されていることを回帰検証する。
+    expect(MAX_REQUEST_BODY).toBe("100kb");
+  });
+
+  it("returns 413 when POST body exceeds the configured limit", async () => {
+    // 既定 100kb を確実に超える 200KB の username で送る。
+    const huge = "a".repeat(200 * 1024);
+    const res = await request(app)
+      .post("/api/users")
+      .set("Content-Type", "application/json")
+      .send({ username: huge, email: "huge@example.com" });
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe("request body too large");
+  });
+
+  it("accepts a normal-sized POST", async () => {
+    const res = await request(app)
+      .post("/api/users")
+      .send({ username: "small", email: "small@example.com" });
+    expect(res.status).toBe(201);
   });
 });
