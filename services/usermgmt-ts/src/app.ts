@@ -1,8 +1,31 @@
-import express, { Request, Response } from "express";
+import express, { NextFunction, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 
+// JSON ペイロードの最大サイズ。express.json の既定は 100kb だが、
+// 運用環境ごとに上書きできるよう環境変数で明示する。
+const MAX_REQUEST_BODY = process.env.MAX_REQUEST_BODY || "100kb";
+
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: MAX_REQUEST_BODY }));
+
+// express.json の limit 超過は entity.too.large になる。既定ハンドラに
+// 任せると HTML 風のエラーが返るため、専用ハンドラで 413 + JSON にする。
+app.use(
+  (
+    err: Error & { type?: string; status?: number; statusCode?: number },
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    const status = err.status ?? err.statusCode;
+    if (err && (err.type === "entity.too.large" || status === 413)) {
+      log("WARN", `Request body too large (limit=${MAX_REQUEST_BODY})`);
+      res.status(413).json({ error: "request body too large" });
+      return;
+    }
+    next(err);
+  },
+);
 
 interface User {
   id: string;
@@ -369,7 +392,7 @@ app.delete("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   res.status(204).send();
 });
 
-export { app, users };
+export { app, users, MAX_REQUEST_BODY };
 
 if (require.main === module) {
   const port = process.env.USERMGMT_PORT || 8003;
