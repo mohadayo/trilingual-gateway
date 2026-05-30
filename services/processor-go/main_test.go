@@ -729,3 +729,133 @@ func TestEnvSeconds_OverrideAndFallback(t *testing.T) {
 		t.Fatalf("expected fallback for negative, got %v", got)
 	}
 }
+
+func TestMessagesQSearch(t *testing.T) {
+	resetMessages()
+
+	seeds := []struct{ channel, payload string }{
+		{"alerts", "server down at us-east-1"},
+		{"alerts", "deploy succeeded"},
+		{"metrics", "cpu high on api-server"},
+		{"logs", "warning: disk usage"},
+	}
+	for _, s := range seeds {
+		body, _ := json.Marshal(map[string]string{"channel": s.channel, "payload": s.payload})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("seed publish failed: code=%d body=%s", w.Code, w.Body.String())
+		}
+	}
+
+	type result struct {
+		Total    int `json:"total"`
+		Count    int `json:"count"`
+		Messages []struct {
+			Channel string `json:"channel"`
+			Payload string `json:"payload"`
+		} `json:"messages"`
+	}
+
+	t.Run("matches payload substring", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?q=server", nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var r result
+		json.NewDecoder(w.Body).Decode(&r)
+		// "server down at us-east-1" + "cpu high on api-server" の 2 件
+		if r.Total != 2 {
+			t.Fatalf("expected 2 matches for 'server', got %d (%+v)", r.Total, r.Messages)
+		}
+	})
+
+	t.Run("matches channel substring", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?q=ert", nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		var r result
+		json.NewDecoder(w.Body).Decode(&r)
+		// "alerts" * 2 件
+		if r.Total != 2 {
+			t.Fatalf("expected 2 matches for 'ert', got %d", r.Total)
+		}
+	})
+
+	t.Run("case-insensitive", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?q=ALERTS", nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		var r result
+		json.NewDecoder(w.Body).Decode(&r)
+		if r.Total != 2 {
+			t.Fatalf("expected 2 case-insensitive matches, got %d", r.Total)
+		}
+	})
+
+	t.Run("no match returns empty", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?q=nothingmatcheshere", nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		var r result
+		json.NewDecoder(w.Body).Decode(&r)
+		if r.Total != 0 || r.Count != 0 {
+			t.Fatalf("expected 0, got %d / %d", r.Total, r.Count)
+		}
+	})
+
+	t.Run("blank q is ignored", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?q=%20%20", nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		var r result
+		json.NewDecoder(w.Body).Decode(&r)
+		if r.Total != 4 {
+			t.Fatalf("expected all 4 messages, got %d", r.Total)
+		}
+	})
+
+	t.Run("combines with channel filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?channel=alerts&q=deploy", nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		var r result
+		json.NewDecoder(w.Body).Decode(&r)
+		if r.Total != 1 {
+			t.Fatalf("expected 1 (alerts + 'deploy'), got %d", r.Total)
+		}
+	})
+
+	t.Run("q too long rejected", func(t *testing.T) {
+		long := strings.Repeat("a", maxSearchLength+1)
+		req := httptest.NewRequest(http.MethodGet, "/api/messages?q="+long, nil)
+		w := httptest.NewRecorder()
+		messagesHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for q too long, got %d", w.Code)
+		}
+	})
+}
+
+func TestNormalizeSearchQuery(t *testing.T) {
+	original := maxSearchLength
+	maxSearchLength = 5
+	defer func() { maxSearchLength = original }()
+
+	if v, err := normalizeSearchQuery(""); v != "" || err != nil {
+		t.Fatalf("empty: got %q err=%v", v, err)
+	}
+	if v, err := normalizeSearchQuery("   "); v != "" || err != nil {
+		t.Fatalf("whitespace: got %q err=%v", v, err)
+	}
+	if v, err := normalizeSearchQuery("  AbC  "); v != "abc" || err != nil {
+		t.Fatalf("trim+lower: got %q err=%v", v, err)
+	}
+	if _, err := normalizeSearchQuery("toolong"); err == nil {
+		t.Fatalf("expected error for too long")
+	}
+}
