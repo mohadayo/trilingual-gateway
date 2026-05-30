@@ -70,6 +70,7 @@ var (
 	maxPageLimit      int
 	maxChannelLength  int
 	maxPayloadLength  int
+	maxSearchLength   int
 	readHeaderTimeout time.Duration
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
@@ -101,10 +102,28 @@ func init() {
 	maxPageLimit = envInt("MAX_PAGE_LIMIT", 1000)
 	maxChannelLength = envInt("MAX_CHANNEL_LENGTH", 256)
 	maxPayloadLength = envInt("MAX_PAYLOAD_LENGTH", 65536)
+	maxSearchLength = envInt("MAX_SEARCH_LENGTH", 100)
 	readHeaderTimeout = envSeconds("PROCESSOR_READ_HEADER_TIMEOUT", 5*time.Second)
 	readTimeout = envSeconds("PROCESSOR_READ_TIMEOUT", 15*time.Second)
 	writeTimeout = envSeconds("PROCESSOR_WRITE_TIMEOUT", 15*time.Second)
 	idleTimeout = envSeconds("PROCESSOR_IDLE_TIMEOUT", 60*time.Second)
+}
+
+// normalizeSearchQuery は `q` クエリを正規化する。
+//   - 未指定 / trim 後が空 → ("", nil, nil)：フィルタしない
+//   - 上限超過 → ("", nil, error)：呼び出し側で 400 を返す
+//   - 正常 → (lowercased, nil, nil)
+//
+// 第二戻り値 errResp は将来エラー詳細を返す拡張用で、現状は常に nil。
+func normalizeSearchQuery(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	if len(trimmed) > maxSearchLength {
+		return "", fmt.Errorf("q must be at most %d characters", maxSearchLength)
+	}
+	return strings.ToLower(trimmed), nil
 }
 
 func parsePagination(q map[string][]string) (limit, offset int) {
@@ -237,6 +256,14 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 	channel := query.Get("channel")
 	limit, offset := parsePagination(query)
 
+	q, qErr := normalizeSearchQuery(query.Get("q"))
+	if qErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: qErr.Error()})
+		return
+	}
+
 	sortField := query.Get("sort")
 	if sortField == "" {
 		sortField = "created_at"
@@ -306,6 +333,12 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if until != nil && m.CreatedAt.After(*until) {
 			continue
+		}
+		if q != "" {
+			if !strings.Contains(strings.ToLower(m.Channel), q) &&
+				!strings.Contains(strings.ToLower(m.Payload), q) {
+				continue
+			}
 		}
 		filtered = append(filtered, m)
 	}
