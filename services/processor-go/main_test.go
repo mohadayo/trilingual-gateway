@@ -859,3 +859,157 @@ func TestNormalizeSearchQuery(t *testing.T) {
 		t.Fatalf("expected error for too long")
 	}
 }
+
+func TestStatsHandlerMethodNotAllowed(t *testing.T) {
+	// POST 等非 GET は 405 で拒否される。
+	req := httptest.NewRequest(http.MethodPost, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestStatsHandlerFilteringByChannel(t *testing.T) {
+	resetMessages()
+	for _, ch := range []string{"a", "a", "b", "c"} {
+		body, _ := json.Marshal(map[string]string{"channel": ch, "payload": "data"})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?channel=a", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total_messages"].(float64)) != 2 {
+		t.Fatalf("expected 2 total for channel=a, got %v", resp["total_messages"])
+	}
+	channels := resp["channels"].(map[string]interface{})
+	if len(channels) != 1 || channels["a"].(float64) != 2 {
+		t.Fatalf("expected {a:2}, got %v", channels)
+	}
+}
+
+func TestStatsHandlerFilteringByQ(t *testing.T) {
+	resetMessages()
+	cases := []struct {
+		channel string
+		payload string
+	}{
+		{"alerts", "disk full"},
+		{"alerts", "cpu high"},
+		{"info", "disk replaced"},
+	}
+	for _, c := range cases {
+		body, _ := json.Marshal(map[string]string{"channel": c.channel, "payload": c.payload})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?q=disk", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	// "disk" を含むのは 2 件（alerts/disk full と info/disk replaced）
+	if int(resp["total_messages"].(float64)) != 2 {
+		t.Fatalf("expected 2 total for q=disk, got %v", resp["total_messages"])
+	}
+}
+
+func TestStatsHandlerFilteringBySinceUntil(t *testing.T) {
+	resetMessages()
+	// 直接 messages にタイムスタンプ込みで投入する（publishHandler は now を打つため）
+	now := time.Now().UTC()
+	mu.Lock()
+	messages = []Message{
+		{ID: "1", Channel: "a", Payload: "p1", CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "2", Channel: "a", Payload: "p2", CreatedAt: now.Add(-1 * time.Hour)},
+		{ID: "3", Channel: "b", Payload: "p3", CreatedAt: now},
+	}
+	mu.Unlock()
+
+	// 過去 90 分以内
+	since := now.Add(-90 * time.Minute).Format(time.RFC3339)
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?since="+since, nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	// since 以降は 2 件 (ID=2,3)
+	if int(resp["total_messages"].(float64)) != 2 {
+		t.Fatalf("expected 2 since=-90m, got %v", resp["total_messages"])
+	}
+}
+
+func TestStatsHandlerSinceGreaterThanUntilIsRejected(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/stats?since=2030-01-02T00:00:00Z&until=2030-01-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestStatsHandlerInvalidSinceIsRejected(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestStatsHandlerQTooLongIsRejected(t *testing.T) {
+	resetMessages()
+	long := strings.Repeat("a", maxSearchLength+1)
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?q="+long, nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestStatsHandlerNoFiltersReturnsAll(t *testing.T) {
+	// 後方互換性の回帰テスト: フィルタ無しなら従来通り全件集計を返す。
+	resetMessages()
+	for _, ch := range []string{"x", "x", "y"} {
+		body, _ := json.Marshal(map[string]string{"channel": ch, "payload": "d"})
+		req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+		w := httptest.NewRecorder()
+		publishHandler(w, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total_messages"].(float64)) != 3 {
+		t.Fatalf("expected 3 total, got %v", resp["total_messages"])
+	}
+}
