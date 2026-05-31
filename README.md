@@ -100,14 +100,17 @@ curl http://localhost:8001/api/events/summary
 | GET | `/health` | Health check |
 | POST | `/api/messages` | Publish a message to a channel |
 | GET | `/api/messages` | List messages with filtering / pagination / sorting (see params below) |
-| GET | `/api/stats` | Message count per channel |
+| GET | `/api/stats` | Message count per channel（`?channel=` / `?q=` / `?since=` / `?until=` でフィルタ後の集計を返す） |
 
 **`GET /api/messages` query parameters:**
 - `channel`: 完全一致でチャンネルを絞り込み
+- `q`: `channel` / `payload` の大文字小文字無視の部分一致（最大 `MAX_SEARCH_LENGTH` 文字）
 - `limit` / `offset`: ページネーション（`limit` 既定 `DEFAULT_PAGE_LIMIT`、上限 `MAX_PAGE_LIMIT`）
 - `since` / `until`: ISO 8601 / RFC 3339 タイムスタンプで期間絞り込み（`until` ≥ `since`）
 - `sort`: `created_at`（既定）/ `channel` / `id`
 - `order`: `asc`（既定）/ `desc`
+
+**`GET /api/stats` query parameters:** `channel` / `q` / `since` / `until` を `/api/messages` と同じセマンティクスで受け付け、フィルタ後のメッセージから `total_messages` とチャンネル別件数を集計する。GET 以外のメソッドは 405。
 
 **Validation rules (POST):**
 - `channel`: 必須、トリム後 1〜`MAX_CHANNEL_LENGTH`（既定 256）文字
