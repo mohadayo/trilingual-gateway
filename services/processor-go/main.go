@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -124,6 +125,68 @@ func normalizeSearchQuery(raw string) (string, error) {
 		return "", fmt.Errorf("q must be at most %d characters", maxSearchLength)
 	}
 	return strings.ToLower(trimmed), nil
+}
+
+// messageFilters は GET /api/messages と GET /api/stats が共有する
+// フィルタクエリの解析結果。
+type messageFilters struct {
+	channel string
+	q       string
+	since   *time.Time
+	until   *time.Time
+}
+
+// parseMessageFilters は `channel` / `q` / `since` / `until` を解析する。
+// 解析失敗時は errMsg を返す（呼び出し側で 400 を返す）。
+func parseMessageFilters(query url.Values) (messageFilters, string) {
+	var f messageFilters
+	f.channel = query.Get("channel")
+
+	q, qErr := normalizeSearchQuery(query.Get("q"))
+	if qErr != nil {
+		return messageFilters{}, qErr.Error()
+	}
+	f.q = q
+
+	if raw := query.Get("since"); raw != "" {
+		t, err := parseTimeQuery(raw)
+		if err != nil {
+			return messageFilters{}, fmt.Sprintf("query parameter 'since' %s", err.Error())
+		}
+		f.since = &t
+	}
+	if raw := query.Get("until"); raw != "" {
+		t, err := parseTimeQuery(raw)
+		if err != nil {
+			return messageFilters{}, fmt.Sprintf("query parameter 'until' %s", err.Error())
+		}
+		f.until = &t
+	}
+	if f.since != nil && f.until != nil && f.until.Before(*f.since) {
+		return messageFilters{}, "query parameter 'until' must be greater than or equal to 'since'"
+	}
+	return f, ""
+}
+
+// matchesFilters は単一メッセージが messageFilters に合致するかを返す。
+// `messages` ストア全体のスキャンで使うため、ホットパス上にある（インライン化を期待）。
+func (f messageFilters) matches(m Message) bool {
+	if f.channel != "" && m.Channel != f.channel {
+		return false
+	}
+	if f.since != nil && m.CreatedAt.Before(*f.since) {
+		return false
+	}
+	if f.until != nil && m.CreatedAt.After(*f.until) {
+		return false
+	}
+	if f.q != "" {
+		if !strings.Contains(strings.ToLower(m.Channel), f.q) &&
+			!strings.Contains(strings.ToLower(m.Payload), f.q) {
+			return false
+		}
+	}
+	return true
 }
 
 func parsePagination(q map[string][]string) (limit, offset int) {
@@ -253,14 +316,13 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query()
-	channel := query.Get("channel")
 	limit, offset := parsePagination(query)
 
-	q, qErr := normalizeSearchQuery(query.Get("q"))
-	if qErr != nil {
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: qErr.Error()})
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
 		return
 	}
 
@@ -286,59 +348,13 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var since, until *time.Time
-	if raw := query.Get("since"); raw != "" {
-		t, err := parseTimeQuery(raw)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ErrorResponse{
-				Error: fmt.Sprintf("query parameter 'since' %s", err.Error()),
-			})
-			return
-		}
-		since = &t
-	}
-	if raw := query.Get("until"); raw != "" {
-		t, err := parseTimeQuery(raw)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ErrorResponse{
-				Error: fmt.Sprintf("query parameter 'until' %s", err.Error()),
-			})
-			return
-		}
-		until = &t
-	}
-	if since != nil && until != nil && until.Before(*since) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorResponse{
-			Error: "query parameter 'until' must be greater than or equal to 'since'",
-		})
-		return
-	}
-
 	mu.RLock()
 	defer mu.RUnlock()
 
 	filtered := make([]Message, 0, len(messages))
 	for _, m := range messages {
-		if channel != "" && m.Channel != channel {
+		if !filters.matches(m) {
 			continue
-		}
-		if since != nil && m.CreatedAt.Before(*since) {
-			continue
-		}
-		if until != nil && m.CreatedAt.After(*until) {
-			continue
-		}
-		if q != "" {
-			if !strings.Contains(strings.ToLower(m.Channel), q) &&
-				!strings.Contains(strings.ToLower(m.Payload), q) {
-				continue
-			}
 		}
 		filtered = append(filtered, m)
 	}
@@ -393,17 +409,37 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	filters, ferr := parseMessageFilters(r.URL.Query())
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
 	mu.RLock()
 	defer mu.RUnlock()
 
 	channels := make(map[string]int)
+	total := 0
 	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
 		channels[m.Channel]++
+		total++
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_messages": len(messages),
+		"total_messages": total,
 		"channels":       channels,
 	})
 }
