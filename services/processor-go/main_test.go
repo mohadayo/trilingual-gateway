@@ -1013,3 +1013,169 @@ func TestStatsHandlerNoFiltersReturnsAll(t *testing.T) {
 		t.Fatalf("expected 3 total, got %v", resp["total_messages"])
 	}
 }
+
+// seedDeletableMessages は削除テスト用に固定の CreatedAt を持つメッセージ群を直接挿入する。
+func seedDeletableMessages() {
+	mu.Lock()
+	messages = []Message{
+		{ID: "m1", Channel: "alerts", Payload: "a", Processed: true, CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "m2", Channel: "alerts", Payload: "b", Processed: true, CreatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "m3", Channel: "info", Payload: "c", Processed: true, CreatedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "m4", Channel: "info", Payload: "d", Processed: true, CreatedAt: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "m5", Channel: "debug", Payload: "e", Processed: true, CreatedAt: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+}
+
+func TestDeleteMessages_MissingFiltersReturns400(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete, "/api/messages", nil)
+	w := httptest.NewRecorder()
+	// 経由は main の mux と同じく method switch（テストでは直接ハンドラを呼ぶ）
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	mu.RLock()
+	got := len(messages)
+	mu.RUnlock()
+	if got != 5 {
+		t.Fatalf("expected 5 still present, got %d", got)
+	}
+}
+
+func TestDeleteMessages_ByChannel(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete, "/api/messages?channel=alerts", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2, got %v", resp["deleted"])
+	}
+	if resp["channel"] != "alerts" {
+		t.Fatalf("expected channel=alerts, got %v", resp["channel"])
+	}
+	if resp["before"] != nil {
+		t.Fatalf("expected before=null, got %v", resp["before"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 remaining, got %d", len(messages))
+	}
+	for _, m := range messages {
+		if m.Channel == "alerts" {
+			t.Fatalf("alerts channel still present: %s", m.ID)
+		}
+	}
+}
+
+func TestDeleteMessages_BeforeOnly(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?before=2026-03-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	// 2026-03-01 “未満” → 1月 / 2月 の 2 件のみ削除
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 remaining, got %d", len(messages))
+	}
+}
+
+func TestDeleteMessages_CombinedFilters(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	// channel=info かつ before=2026-04-01 → m3 のみ
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?channel=info&before=2026-04-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 1 {
+		t.Fatalf("expected deleted=1, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 remaining, got %d", len(messages))
+	}
+	for _, m := range messages {
+		if m.ID == "m3" {
+			t.Fatalf("m3 should have been deleted")
+		}
+	}
+}
+
+func TestDeleteMessages_NoMatchReturnsZero(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?channel=nonexistent", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 0 {
+		t.Fatalf("expected deleted=0, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(messages) != 5 {
+		t.Fatalf("expected all 5 still present, got %d", len(messages))
+	}
+}
+
+func TestDeleteMessages_InvalidBeforeReturns400(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?before=not-a-date", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !strings.Contains(resp["error"], "before") {
+		t.Fatalf("expected error to mention 'before', got %q", resp["error"])
+	}
+}
+
+func TestDeleteMessages_BlankChannelTreatedAsUnspecified(t *testing.T) {
+	// channel=" " のように空白だけは指定なし扱いとし、before も無ければ 400 を返す。
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?channel=%20%20", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
