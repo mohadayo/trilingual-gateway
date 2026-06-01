@@ -408,6 +408,79 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// deleteMessagesHandler は channel / before のフィルタ AND で
+// 一致するメッセージを削除する。誤って全件削除する事故を避けるため、
+// 両方とも未指定の場合は 400 を返す。
+func deleteMessagesHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	channel := strings.TrimSpace(query.Get("channel"))
+
+	var before *time.Time
+	if raw := query.Get("before"); raw != "" {
+		t, err := parseTimeQuery(raw)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse{
+				Error: fmt.Sprintf("query parameter 'before' %s", err.Error()),
+			})
+			return
+		}
+		before = &t
+	}
+
+	if channel == "" && before == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{
+			Error: "at least one of 'channel' or 'before' must be provided",
+		})
+		return
+	}
+
+	mu.Lock()
+	kept := make([]Message, 0, len(messages))
+	deleted := 0
+	for _, m := range messages {
+		// 全フィルタに合致するものを削除（保持しない）
+		matchChannel := channel == "" || m.Channel == channel
+		matchBefore := before == nil || m.CreatedAt.Before(*before)
+		if matchChannel && matchBefore {
+			deleted++
+			continue
+		}
+		kept = append(kept, m)
+	}
+	messages = kept
+	mu.Unlock()
+
+	beforeOut := ""
+	if before != nil {
+		beforeOut = before.Format(time.RFC3339)
+	}
+	logger.Printf(
+		"Messages deleted: count=%d channel=%q before=%q",
+		deleted, channel, beforeOut,
+	)
+
+	resp := map[string]interface{}{
+		"deleted": deleted,
+		"channel": nullableString(channel),
+		"before":  nullableString(beforeOut),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// nullableString は空文字列を JSON null として表現するためのヘルパ。
+// フィルタ未指定を明示するため、`""` ではなく `null` を返す。
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -458,6 +531,8 @@ func main() {
 			messagesHandler(w, r)
 		case http.MethodPost:
 			publishHandler(w, r)
+		case http.MethodDelete:
+			deleteMessagesHandler(w, r)
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
