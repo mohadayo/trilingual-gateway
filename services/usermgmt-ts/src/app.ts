@@ -80,6 +80,24 @@ const ALLOWED_SORT_FIELDS = new Set<SortField>([
 ]);
 const ALLOWED_SORT_ORDERS = new Set<SortOrder>(["asc", "desc"]);
 
+// ISO 8601 / RFC 3339 文字列を Date に変換する。
+// `Z` サフィックスは `+00:00` として扱う（Node の Date は両方を受けるが、
+// processor-go と統一するため明示的に正規化）。空文字や不正フォーマットは Error。
+function parseIsoDateTime(value: string, field: string): Date {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`${field} must not be blank`);
+  }
+  const normalized = trimmed.endsWith("Z")
+    ? `${trimmed.slice(0, -1)}+00:00`
+    : trimmed;
+  const d = new Date(normalized);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`${field} must be an ISO 8601 / RFC 3339 datetime`);
+  }
+  return d;
+}
+
 function parseListQuery(
   query: Record<string, unknown>,
 ): {
@@ -90,6 +108,8 @@ function parseListQuery(
   q: string | null;
   sort: SortField;
   order: SortOrder;
+  since: Date | null;
+  until: Date | null;
 } | { ok: false; error: string } {
   let limit = USERS_DEFAULT_LIMIT;
   let offset = 0;
@@ -97,6 +117,8 @@ function parseListQuery(
   let q: string | null = null;
   let sort: SortField = "created_at";
   let order: SortOrder = "asc";
+  let since: Date | null = null;
+  let until: Date | null = null;
 
   if (query.limit !== undefined) {
     const raw = String(query.limit);
@@ -175,7 +197,30 @@ function parseListQuery(
     order = raw as SortOrder;
   }
 
-  return { ok: true, limit, offset, role, q, sort, order };
+  if (query.since !== undefined) {
+    try {
+      since = parseIsoDateTime(String(query.since), "since");
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+
+  if (query.until !== undefined) {
+    try {
+      until = parseIsoDateTime(String(query.until), "until");
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+
+  if (since !== null && until !== null && until < since) {
+    return {
+      ok: false,
+      error: "until must be greater than or equal to since",
+    };
+  }
+
+  return { ok: true, limit, offset, role, q, sort, order, since, until };
 }
 
 interface ValidatedInput {
@@ -301,7 +346,7 @@ app.get("/api/users", (req: Request, res: Response) => {
     res.status(400).json({ error: parsed.error });
     return;
   }
-  const { limit, offset, role, q, sort, order } = parsed;
+  const { limit, offset, role, q, sort, order, since, until } = parsed;
 
   let list = Array.from(users.values());
   if (role !== null) {
@@ -313,6 +358,19 @@ app.get("/api/users", (req: Request, res: Response) => {
         u.username.toLowerCase().includes(q) ||
         u.email.toLowerCase().includes(q),
     );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      // created_at は POST/PUT 時に new Date().toISOString() で書き込んでいるため
+      // パース失敗は通常起き得ないが、保険として除外扱いにする
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
   }
 
   const reverse = order === "desc";
