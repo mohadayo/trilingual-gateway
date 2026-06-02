@@ -520,6 +520,94 @@ describe("GET /api/users search and sort", () => {
   });
 });
 
+describe("GET /api/users created_at range filter (since/until)", () => {
+  // created_at は POST 時に new Date().toISOString() で設定されてしまうため、
+  // 制御されたタイムスタンプでの絞り込みを検証するには users Map に直接挿入する。
+  function seed(date: string, idx: number) {
+    const id = `seed-${idx}-${Date.now()}`;
+    users.set(id, {
+      id,
+      username: `user${idx}`,
+      email: `user${idx}@example.com`,
+      role: "user",
+      created_at: date,
+      updated_at: date,
+    });
+    return id;
+  }
+
+  it("filters by since", async () => {
+    seed("2026-01-01T00:00:00Z", 1);
+    seed("2026-05-01T00:00:00Z", 2);
+    seed("2026-06-01T00:00:00Z", 3);
+    const res = await request(app).get("/api/users?since=2026-04-01T00:00:00Z");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    const dates = res.body.users.map((u: { created_at: string }) => u.created_at);
+    expect(dates).toEqual(
+      expect.arrayContaining(["2026-05-01T00:00:00Z", "2026-06-01T00:00:00Z"]),
+    );
+  });
+
+  it("filters by until", async () => {
+    seed("2026-01-01T00:00:00Z", 1);
+    seed("2026-05-01T00:00:00Z", 2);
+    seed("2026-06-01T00:00:00Z", 3);
+    const res = await request(app).get("/api/users?until=2026-05-01T00:00:00Z");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("filters by since and until combined", async () => {
+    seed("2026-01-01T00:00:00Z", 1);
+    seed("2026-03-15T00:00:00Z", 2);
+    seed("2026-05-01T00:00:00Z", 3);
+    seed("2026-06-01T00:00:00Z", 4);
+    const res = await request(app).get(
+      "/api/users?since=2026-03-01T00:00:00Z&until=2026-05-31T00:00:00Z",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("rejects since with invalid format", async () => {
+    const res = await request(app).get("/api/users?since=not-a-date");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("since");
+  });
+
+  it("rejects until with invalid format", async () => {
+    const res = await request(app).get("/api/users?until=tomorrow");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("until");
+  });
+
+  it("rejects since > until", async () => {
+    const res = await request(app).get(
+      "/api/users?since=2026-06-01T00:00:00Z&until=2026-05-01T00:00:00Z",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/until.*since/);
+  });
+
+  it("accepts Z and +00:00 forms interchangeably", async () => {
+    seed("2026-05-15T00:00:00Z", 1);
+    const resZ = await request(app).get("/api/users?since=2026-05-01T00:00:00Z");
+    const resOffset = await request(app).get(
+      "/api/users?since=2026-05-01T00:00:00%2B00:00",
+    );
+    expect(resZ.body.total).toBe(1);
+    expect(resOffset.body.total).toBe(1);
+  });
+
+  it("returns full set when neither since nor until is provided", async () => {
+    seed("2026-01-01T00:00:00Z", 1);
+    seed("2026-06-01T00:00:00Z", 2);
+    const res = await request(app).get("/api/users");
+    expect(res.body.total).toBe(2);
+  });
+});
+
 describe("JSON body size limit", () => {
   it("uses the documented default of 100kb when env var is not set", () => {
     // 既定値が明示されていることを回帰検証する。
