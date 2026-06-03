@@ -220,21 +220,72 @@ def list_events():
 @app.route("/api/events", methods=["DELETE"])
 def delete_events():
     event_name = request.args.get("event_name")
-    if not event_name:
-        logger.warning("Delete request missing event_name parameter")
-        return jsonify({"error": "event_name query parameter is required"}), 400
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    # 全件削除事故を防ぐため、最低 1 つのフィルタを必須にする。
+    if not event_name and since_raw is None and until_raw is None:
+        logger.warning("Delete request missing filter parameters")
+        return jsonify({
+            "error": "at least one of 'event_name', 'since', 'until' is required",
+        }), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on delete: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on delete: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    def _ts(event: dict) -> datetime | None:
+        raw = event.get("timestamp")
+        if not isinstance(raw, str):
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _matches(event: dict) -> bool:
+        if event_name and event.get("event_name") != event_name:
+            return False
+        if since is not None or until is not None:
+            ts = _ts(event)
+            if ts is None:
+                return False
+            if since is not None and ts < since:
+                return False
+            if until is not None and ts > until:
+                return False
+        return True
 
     with events_lock:
-        before_count = len(events_store)
-        events_store[:] = [e for e in events_store if e["event_name"] != event_name]
-        deleted_count = before_count - len(events_store)
+        kept = [e for e in events_store if not _matches(e)]
+        deleted_count = len(events_store) - len(kept)
+        events_store[:] = kept
 
-    if deleted_count == 0:
-        logger.info("No events found for deletion: %s", event_name)
-        return jsonify({"error": "No events found with the specified event_name"}), 404
-
-    logger.info("Deleted %d events with event_name=%s", deleted_count, event_name)
-    return jsonify({"message": "Events deleted", "deleted_count": deleted_count})
+    logger.info(
+        "Deleted %d events (event_name=%s since=%s until=%s)",
+        deleted_count, event_name, since_raw, until_raw,
+    )
+    return jsonify({
+        "message": "Events deleted",
+        "deleted_count": deleted_count,
+        "event_name": event_name,
+        "since": since_raw,
+        "until": until_raw,
+    })
 
 
 @app.route("/api/events/summary", methods=["GET"])
