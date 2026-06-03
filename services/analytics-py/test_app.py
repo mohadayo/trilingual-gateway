@@ -139,13 +139,71 @@ def test_delete_events_success(client):
 
 
 def test_delete_events_not_found(client):
+    # processor-go の DELETE /api/messages と同じく、フィルタ未マッチは 200 + deleted_count=0
     resp = client.delete("/api/events?event_name=nonexistent")
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_count"] == 0
+    assert data["event_name"] == "nonexistent"
 
 
 def test_delete_events_missing_param(client):
     resp = client.delete("/api/events")
     assert resp.status_code == 400
+    assert "at least one of" in resp.get_json()["error"]
+
+
+def test_delete_events_since(client):
+    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    resp = client.delete("/api/events?since=2024-01-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_count"] == 2
+    remaining = [e["event_name"] for e in events_store]
+    assert remaining == ["old"]
+
+
+def test_delete_events_until(client):
+    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    resp = client.delete("/api/events?until=2024-06-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_count"] == 2
+    remaining = [e["event_name"] for e in events_store]
+    assert remaining == ["new"]
+
+
+def test_delete_events_since_and_until_and_event_name(client):
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2025-06-01T00:00:00+00:00"})
+    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "scroll", "properties": {}, "timestamp": "2025-06-01T00:00:00+00:00"})
+    resp = client.delete(
+        "/api/events?event_name=click&since=2025-01-01T00:00:00Z&until=2025-12-31T23:59:59Z"
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_count"] == 1
+    remaining = sorted(e["event_name"] for e in events_store)
+    assert remaining == ["click", "click", "scroll"]
+
+
+def test_delete_events_invalid_since(client):
+    resp = client.delete("/api/events?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_delete_events_since_greater_than_until(client):
+    resp = client.delete(
+        "/api/events?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
 
 
 def test_events_summary(client):
