@@ -481,6 +481,44 @@ func nullableString(s string) interface{} {
 	return s
 }
 
+// getMessageByIDHandler は path パラメータ `id` に一致するメッセージを 1 件返す。
+// 経路は Go 1.22 の http.ServeMux パスパラメータ機能で
+// `GET /api/messages/{id}` として登録される。
+//
+// - GET 以外: 405
+// - id が空 or 一致なし: 404
+// - 一致あり: 200 + Message
+func getMessageByIDHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "message not found"})
+		return
+	}
+
+	mu.RLock()
+	defer mu.RUnlock()
+	for _, m := range messages {
+		if m.ID == id {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(m)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	json.NewEncoder(w).Encode(ErrorResponse{Error: "message not found"})
+}
+
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -539,6 +577,9 @@ func main() {
 			json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
 		}
 	})
+	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
+	// `/api/messages/{id}` (単一) は別経路として共存する。
+	mux.HandleFunc("GET /api/messages/{id}", getMessageByIDHandler)
 	mux.HandleFunc("/api/stats", statsHandler)
 
 	srv := &http.Server{
