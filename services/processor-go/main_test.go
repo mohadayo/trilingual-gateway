@@ -1179,3 +1179,104 @@ func TestDeleteMessages_BlankChannelTreatedAsUnspecified(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+// --- GET /api/messages/{id} ---
+
+func seedThreeMessages(t *testing.T) []Message {
+	t.Helper()
+	resetMessages()
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	m1 := Message{ID: "id-1", Channel: "alpha", Payload: "p1", Processed: true, CreatedAt: now}
+	m2 := Message{ID: "id-2", Channel: "alpha", Payload: "p2", Processed: true, CreatedAt: now.Add(time.Second)}
+	m3 := Message{ID: "id-3", Channel: "beta", Payload: "p3", Processed: true, CreatedAt: now.Add(2 * time.Second)}
+	mu.Lock()
+	messages = []Message{m1, m2, m3}
+	mu.Unlock()
+	return []Message{m1, m2, m3}
+}
+
+func TestGetMessageByID_ReturnsMessageWhenFound(t *testing.T) {
+	seeded := seedThreeMessages(t)
+	target := seeded[1] // id-2
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/id-2", nil)
+	req.SetPathValue("id", target.ID)
+	w := httptest.NewRecorder()
+	getMessageByIDHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+	var got Message
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, w.Body.String())
+	}
+	if got.ID != target.ID || got.Channel != target.Channel || got.Payload != target.Payload {
+		t.Errorf("unexpected message: %+v want %+v", got, target)
+	}
+}
+
+func TestGetMessageByID_ReturnsNotFoundForUnknownID(t *testing.T) {
+	seedThreeMessages(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/nope", nil)
+	req.SetPathValue("id", "nope")
+	w := httptest.NewRecorder()
+	getMessageByIDHandler(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.Error == "" {
+		t.Errorf("expected non-empty error field")
+	}
+}
+
+func TestGetMessageByID_ReturnsNotFoundForBlankID(t *testing.T) {
+	seedThreeMessages(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/", nil)
+	req.SetPathValue("id", "   ")
+	w := httptest.NewRecorder()
+	getMessageByIDHandler(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for blank id, got %d", w.Code)
+	}
+}
+
+func TestGetMessageByID_RejectsNonGETMethods(t *testing.T) {
+	seedThreeMessages(t)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		req := httptest.NewRequest(method, "/api/messages/id-1", nil)
+		req.SetPathValue("id", "id-1")
+		w := httptest.NewRecorder()
+		getMessageByIDHandler(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("method %s: expected 405, got %d", method, w.Code)
+		}
+	}
+}
+
+func TestGetMessageByID_DoesNotMisMatchWithinSameChannel(t *testing.T) {
+	// 同じ channel に複数メッセージがあっても、ID 完全一致のもののみ返ること。
+	seeded := seedThreeMessages(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/id-1", nil)
+	req.SetPathValue("id", "id-1")
+	w := httptest.NewRecorder()
+	getMessageByIDHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var got Message
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != seeded[0].ID {
+		t.Errorf("expected id-1, got %s", got.ID)
+	}
+	if got.Payload != "p1" {
+		t.Errorf("expected payload p1, got %s", got.Payload)
+	}
+}
