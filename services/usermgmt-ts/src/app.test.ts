@@ -632,3 +632,107 @@ describe("JSON body size limit", () => {
     expect(res.status).toBe(201);
   });
 });
+
+describe("GET /api/users/count", () => {
+  it("returns zero totals for an empty store", async () => {
+    const res = await request(app).get("/api/users/count");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(0);
+    expect(res.body.by_role).toEqual({ user: 0, admin: 0, moderator: 0 });
+  });
+
+  it("counts users by role with all roles initialized to 0", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u1", email: "u1@example.com", role: "user" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u2", email: "u2@example.com", role: "admin" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u3", email: "u3@example.com", role: "admin" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "u4", email: "u4@example.com" }); // default role = "user"
+
+    const res = await request(app).get("/api/users/count");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(4);
+    expect(res.body.by_role.user).toBe(2);
+    expect(res.body.by_role.admin).toBe(2);
+    expect(res.body.by_role.moderator).toBe(0);
+  });
+
+  it("filters by ?role=", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "a", email: "a@example.com", role: "admin" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "b", email: "b@example.com", role: "user" });
+    const res = await request(app).get("/api/users/count?role=admin");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.by_role.admin).toBe(1);
+    expect(res.body.by_role.user).toBe(0);
+  });
+
+  it("filters by ?q= (case-insensitive partial match on username or email)", async () => {
+    await request(app)
+      .post("/api/users")
+      .send({ username: "alice", email: "alice@example.com" });
+    await request(app)
+      .post("/api/users")
+      .send({ username: "bob", email: "bob@example.com" });
+    const res = await request(app).get("/api/users/count?q=ALI");
+    expect(res.body.total).toBe(1);
+  });
+
+  it("rejects invalid role", async () => {
+    const res = await request(app).get("/api/users/count?role=superuser");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("role must be one of");
+  });
+
+  it("rejects invalid since", async () => {
+    const res = await request(app).get("/api/users/count?since=not-a-date");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects since > until", async () => {
+    const res = await request(app).get(
+      "/api/users/count?since=2030-01-01T00:00:00Z&until=2020-01-01T00:00:00Z",
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects q above MAX_SEARCH_LENGTH", async () => {
+    const longQ = "x".repeat(1000);
+    const res = await request(app).get(
+      `/api/users/count?q=${encodeURIComponent(longQ)}`,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("ignores limit/offset/sort/order parameters silently when within valid range", async () => {
+    // count はレコードを返さないため limit/offset/sort/order は count 結果に
+    // 影響しない。許容範囲内の値で渡された場合は 200 を返し、total は変わらない。
+    await request(app)
+      .post("/api/users")
+      .send({ username: "a", email: "a@example.com" });
+    const res = await request(app).get(
+      "/api/users/count?limit=10&offset=0&sort=email&order=desc",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+  });
+
+  it("does not collide with the /:id route", async () => {
+    // ユーザ id が "count" になることは UUID v4 では起きないが、
+    // ルート登録順で `count` が `:id` より前にあるため、`/count` は常に count を返す。
+    const res = await request(app).get("/api/users/count");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("by_role");
+    expect(res.body).not.toHaveProperty("error");
+  });
+});
