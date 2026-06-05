@@ -395,6 +395,52 @@ app.get("/api/users", (req: Request, res: Response) => {
   });
 });
 
+// `/api/users/:id` より前に登録して、`:id == "count"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は count では意味を持たないため無視する。
+app.get("/api/users/count", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/count rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // ALLOWED_ROLES の全キーを 0 初期化。クライアントは存在チェック無しで参照できる。
+  const byRole: Record<string, number> = {};
+  for (const r of ALLOWED_ROLES) {
+    byRole[r] = 0;
+  }
+  for (const u of list) {
+    byRole[u.role] = (byRole[u.role] ?? 0) + 1;
+  }
+  res.json({ total: list.length, by_role: byRole });
+});
+
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
