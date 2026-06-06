@@ -524,3 +524,147 @@ def test_events_lock_concurrent_writes():
         t.join()
 
     assert len(store) == 4 * 40
+
+
+# ---------------------------------------------------------------------------
+# GET /api/events/names — distinct event_name 一覧のみを返す軽量エンドポイント
+# ---------------------------------------------------------------------------
+
+
+def test_event_names_empty_store(client):
+    resp = client.get("/api/events/names")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["names"] == []
+    assert data["total"] == 0
+    assert data["count"] == 0
+    assert data["order"] == "asc"
+
+
+def test_event_names_distinct_and_sorted_asc(client):
+    # 同じ event_name を複数回投入しても 1 件にまとめられる、かつ昇順で返る
+    for name in ("zeta", "alpha", "beta", "alpha", "beta"):
+        client.post("/api/events", json={"event_name": name})
+    resp = client.get("/api/events/names")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["names"] == ["alpha", "beta", "zeta"]
+    assert data["total"] == 3
+    assert data["count"] == 3
+
+
+def test_event_names_order_desc(client):
+    for name in ("alpha", "beta", "zeta"):
+        client.post("/api/events", json={"event_name": name})
+    resp = client.get("/api/events/names?order=desc")
+    assert resp.status_code == 200
+    assert resp.get_json()["names"] == ["zeta", "beta", "alpha"]
+
+
+def test_event_names_invalid_order_returns_400(client):
+    resp = client.get("/api/events/names?order=upside_down")
+    assert resp.status_code == 400
+    assert "allowed" in resp.get_json()
+
+
+def test_event_names_pagination(client):
+    for name in ("a", "b", "c", "d", "e"):
+        client.post("/api/events", json={"event_name": name})
+    resp = client.get("/api/events/names?limit=2&offset=1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["names"] == ["b", "c"]
+    assert data["count"] == 2
+    assert data["total"] == 5
+    assert data["limit"] == 2
+    assert data["offset"] == 1
+
+
+def test_event_names_limit_clamped_to_max(client, monkeypatch):
+    # MAX_PAGE_LIMIT を 3 に下げて、limit=999 が 3 にクランプされることを回帰する
+    monkeypatch.setattr("app.MAX_PAGE_LIMIT", 3)
+    for name in ("a", "b", "c", "d", "e"):
+        client.post("/api/events", json={"event_name": name})
+    resp = client.get("/api/events/names?limit=999")
+    assert resp.status_code == 200
+    assert resp.get_json()["limit"] == 3
+
+
+def test_event_names_negative_limit_falls_back_to_default(client):
+    client.post("/api/events", json={"event_name": "x"})
+    resp = client.get("/api/events/names?limit=-5")
+    assert resp.status_code == 200
+    # 既定 limit にフォールバックする（既存 list_events と挙動を揃える）
+    assert resp.get_json()["limit"] > 0
+
+
+def test_event_names_negative_offset_clamps_to_zero(client):
+    client.post("/api/events", json={"event_name": "x"})
+    resp = client.get("/api/events/names?offset=-1")
+    assert resp.status_code == 200
+    assert resp.get_json()["offset"] == 0
+
+
+def test_event_names_q_filter_case_insensitive(client):
+    for name in ("page_view", "Page_Click", "signup", "API_Call"):
+        client.post("/api/events", json={"event_name": name})
+    resp = client.get("/api/events/names?q=page")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # "page" を大文字小文字無視で含む 2 件
+    assert set(data["names"]) == {"page_view", "Page_Click"}
+    assert data["total"] == 2
+
+
+def test_event_names_q_blank_returns_400(client):
+    resp = client.get("/api/events/names?q=%20%20%20")
+    assert resp.status_code == 400
+
+
+def test_event_names_since_until_filter(client):
+    # 直近のイベントだけが残るように、過去にあった event を直接 events_store に注入する
+    from app import events_store, events_lock
+    with events_lock:
+        events_store.clear()
+        events_store.append({
+            "event_name": "old",
+            "properties": {},
+            "timestamp": "2020-01-01T00:00:00+00:00",
+        })
+        events_store.append({
+            "event_name": "new",
+            "properties": {},
+            "timestamp": "2030-01-01T00:00:00+00:00",
+        })
+    resp = client.get("/api/events/names?since=2025-01-01T00:00:00Z")
+    assert resp.status_code == 200
+    assert resp.get_json()["names"] == ["new"]
+
+
+def test_event_names_invalid_since_returns_400(client):
+    resp = client.get("/api/events/names?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_event_names_since_greater_than_until_returns_400(client):
+    resp = client.get(
+        "/api/events/names?since=2030-01-01T00:00:00Z&until=2020-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_event_names_does_not_collide_with_summary(client):
+    # `/api/events/names` は names 配列を返し、`/api/events/summary` は集計を返す
+    client.post("/api/events", json={"event_name": "click"})
+    client.post("/api/events", json={"event_name": "click"})
+    client.post("/api/events", json={"event_name": "view"})
+
+    names_resp = client.get("/api/events/names")
+    assert names_resp.status_code == 200
+    assert "names" in names_resp.get_json()
+    assert "summary" not in names_resp.get_json()
+
+    summary_resp = client.get("/api/events/summary")
+    assert summary_resp.status_code == 200
+    assert "summary" in summary_resp.get_json()
+    assert summary_resp.get_json()["summary"] == {"click": 2, "view": 1}
