@@ -69,6 +69,7 @@ make lint          # Run all linters
 | GET | `/api/events` | List events with filtering / pagination / sorting (see params below) |
 | DELETE | `/api/events` | Delete events by name (`?event_name=` required) |
 | GET | `/api/events/summary` | Aggregated event counts by name (filterable) |
+| GET | `/api/events/names` | distinct な event_name のみを返す軽量エンドポイント（フィルタドロップダウン / オートコンプリート用） |
 
 **`GET /api/events` query parameters:**
 - `event_name`: 完全一致でイベント名を絞り込み
@@ -78,6 +79,12 @@ make lint          # Run all linters
 - `order`: `asc`（既定）/ `desc`
 
 **`GET /api/events/summary` query parameters:** `event_name` / `since` / `until`（`/api/events` と同じ意味）
+
+**`GET /api/events/names` query parameters:**
+- `q`: event_name の大文字小文字無視部分一致
+- `since` / `until`: ISO 8601 タイムスタンプ範囲フィルタ（`/api/events` と同じパース）
+- `order`: `asc`（既定）/ `desc`（event_name 名昇順 / 降順）
+- `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
 
 **Example:**
 ```bash
@@ -91,6 +98,10 @@ curl "http://localhost:8001/api/events?limit=10&offset=0"
 
 # Get summary
 curl http://localhost:8001/api/events/summary
+
+# Get distinct event_name list (light-weight)
+curl http://localhost:8001/api/events/names
+curl "http://localhost:8001/api/events/names?q=page&order=desc"
 ```
 
 ### Processor Service (`:8002`)
