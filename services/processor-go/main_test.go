@@ -1168,7 +1168,7 @@ func TestDeleteMessages_InvalidBeforeReturns400(t *testing.T) {
 }
 
 func TestDeleteMessages_BlankChannelTreatedAsUnspecified(t *testing.T) {
-	// channel=" " のように空白だけは指定なし扱いとし、before も無ければ 400 を返す。
+	// channel=" " のように空白だけは指定なし扱いとし、since/before も無ければ 400 を返す。
 	resetMessages()
 	seedDeletableMessages()
 	req := httptest.NewRequest(http.MethodDelete,
@@ -1177,6 +1177,147 @@ func TestDeleteMessages_BlankChannelTreatedAsUnspecified(t *testing.T) {
 	deleteMessagesHandler(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestDeleteMessages_SinceOnly(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	// since=2026-03-01 (包含) → 3月/4月/5月 の 3 件
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?since=2026-03-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 3 {
+		t.Fatalf("expected deleted=3, got %v", resp["deleted"])
+	}
+	if resp["since"] != "2026-03-01T00:00:00Z" {
+		t.Fatalf("expected since=2026-03-01T00:00:00Z, got %v", resp["since"])
+	}
+	if resp["before"] != nil {
+		t.Fatalf("expected before=null, got %v", resp["before"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 remaining (m1/m2), got %d", len(messages))
+	}
+}
+
+func TestDeleteMessages_SinceAndBeforeRange(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	// [since=2026-02-01, before=2026-04-01) → m2(2月) と m3(3月) の 2 件
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?since=2026-02-01T00:00:00Z&before=2026-04-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	remainingIDs := []string{}
+	for _, m := range messages {
+		remainingIDs = append(remainingIDs, m.ID)
+	}
+	if len(remainingIDs) != 3 {
+		t.Fatalf("expected 3 remaining, got %d: %v", len(remainingIDs), remainingIDs)
+	}
+}
+
+func TestDeleteMessages_SinceChannelAndBefore(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	// channel=info && since=2026-03-01 && before=2026-05-01 → m3 のみ
+	// (m4 は info かつ 4月だが before 範囲内、since 以降 → 削除)
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?channel=info&since=2026-03-01T00:00:00Z&before=2026-05-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2 (m3+m4), got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	for _, m := range messages {
+		if m.ID == "m3" || m.ID == "m4" {
+			t.Fatalf("%s should have been deleted", m.ID)
+		}
+	}
+}
+
+func TestDeleteMessages_BeforeLessThanSinceReturns400(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?since=2026-06-01T00:00:00Z&before=2026-03-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !strings.Contains(resp["error"], "since") || !strings.Contains(resp["error"], "before") {
+		t.Fatalf("expected error to mention 'since' and 'before', got %q", resp["error"])
+	}
+	// ストアは温存されている
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(messages) != 5 {
+		t.Fatalf("expected 5 remaining, got %d", len(messages))
+	}
+}
+
+func TestDeleteMessages_InvalidSinceReturns400(t *testing.T) {
+	resetMessages()
+	seedDeletableMessages()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !strings.Contains(resp["error"], "since") {
+		t.Fatalf("expected error to mention 'since', got %q", resp["error"])
+	}
+}
+
+func TestDeleteMessages_SinceBoundaryInclusive(t *testing.T) {
+	// since=CreatedAt のレコードは「削除対象に含まれる」（包含境界の回帰）
+	resetMessages()
+	seedDeletableMessages()
+	// m3 の CreatedAt はちょうど 2026-03-01 00:00:00 UTC
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/messages?since=2026-03-01T00:00:00Z&before=2026-03-01T00:00:01Z", nil)
+	w := httptest.NewRecorder()
+	deleteMessagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 1 {
+		t.Fatalf("expected deleted=1 (m3 only), got %v", resp["deleted"])
 	}
 }
 
