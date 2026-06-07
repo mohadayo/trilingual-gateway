@@ -408,9 +408,13 @@ func messagesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// deleteMessagesHandler は channel / before のフィルタ AND で
+// deleteMessagesHandler は channel / since / before のフィルタ AND で
 // 一致するメッセージを削除する。誤って全件削除する事故を避けるため、
-// 両方とも未指定の場合は 400 を返す。
+// すべて未指定の場合は 400 を返す。
+//
+// since は `CreatedAt >= since`（包含）、before は `CreatedAt < before`（排他）。
+// 半開区間 [since, before) として組み合わせれば、「ある月だけ削除」のような
+// 時間範囲指定の削除が 1 リクエストで実現できる。
 func deleteMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	channel := strings.TrimSpace(query.Get("channel"))
@@ -429,11 +433,36 @@ func deleteMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		before = &t
 	}
 
-	if channel == "" && before == nil {
+	var since *time.Time
+	if raw := query.Get("since"); raw != "" {
+		t, err := parseTimeQuery(raw)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse{
+				Error: fmt.Sprintf("query parameter 'since' %s", err.Error()),
+			})
+			return
+		}
+		since = &t
+	}
+
+	if channel == "" && before == nil && since == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse{
-			Error: "at least one of 'channel' or 'before' must be provided",
+			Error: "at least one of 'channel', 'since' or 'before' must be provided",
+		})
+		return
+	}
+
+	// before は排他、since は包含なので since == before の場合に削除対象は空になる。
+	// before < since は意味的に不整合のため 400 を返す（誤指定の早期検知）。
+	if since != nil && before != nil && before.Before(*since) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{
+			Error: "query parameter 'before' must be greater than or equal to 'since'",
 		})
 		return
 	}
@@ -445,7 +474,9 @@ func deleteMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		// 全フィルタに合致するものを削除（保持しない）
 		matchChannel := channel == "" || m.Channel == channel
 		matchBefore := before == nil || m.CreatedAt.Before(*before)
-		if matchChannel && matchBefore {
+		// `!m.CreatedAt.Before(*since)` で `m.CreatedAt >= *since`（包含）
+		matchSince := since == nil || !m.CreatedAt.Before(*since)
+		if matchChannel && matchBefore && matchSince {
 			deleted++
 			continue
 		}
@@ -458,14 +489,19 @@ func deleteMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	if before != nil {
 		beforeOut = before.Format(time.RFC3339)
 	}
+	sinceOut := ""
+	if since != nil {
+		sinceOut = since.Format(time.RFC3339)
+	}
 	logger.Printf(
-		"Messages deleted: count=%d channel=%q before=%q",
-		deleted, channel, beforeOut,
+		"Messages deleted: count=%d channel=%q since=%q before=%q",
+		deleted, channel, sinceOut, beforeOut,
 	)
 
 	resp := map[string]interface{}{
 		"deleted": deleted,
 		"channel": nullableString(channel),
+		"since":   nullableString(sinceOut),
 		"before":  nullableString(beforeOut),
 	}
 	w.Header().Set("Content-Type", "application/json")
