@@ -508,6 +508,93 @@ func deleteMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// messageChannelsHandler は保持中のメッセージから distinct な channel 一覧のみを返す。
+// `/api/stats` は per-channel カウントとペイロード集計を一緒に返すため、UI の
+// チャネル選択ドロップダウン populate などの「名前だけ欲しい」用途には過剰になる。
+// 本ハンドラは集計を行わず、distinct した channel 名を `q` / `since` / `until` で
+// 絞り込み、`order` で並べ替え、`limit` / `offset` でページングして返す。
+//
+// `q` セマンティクスは `/api/messages` と同じで、channel もしくは payload に
+// `q` を部分一致するメッセージを対象に distinct を取る。これにより
+// 「`q=error` を含むメッセージが流れたチャネル」のような調査クエリが書ける。
+//
+// 経路は Go 1.22+ の ServeMux で `GET /api/messages/channels` リテラルとして登録され、
+// `GET /api/messages/{id}` ワイルドカードよりも優先される（パターン仕様準拠）。
+func messageChannelsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	sortOrder := query.Get("order")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	if !allowedMessageSortOrders[sortOrder] {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "order must be one of: asc, desc"})
+		return
+	}
+
+	limit, offset := parsePagination(query)
+
+	mu.RLock()
+	seen := make(map[string]struct{})
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		seen[m.Channel] = struct{}{}
+	}
+	mu.RUnlock()
+
+	distinct := make([]string, 0, len(seen))
+	for c := range seen {
+		distinct = append(distinct, c)
+	}
+	if sortOrder == "desc" {
+		sort.Sort(sort.Reverse(sort.StringSlice(distinct)))
+	} else {
+		sort.Strings(distinct)
+	}
+
+	total := len(distinct)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := distinct[start:end]
+	if page == nil {
+		page = []string{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"channels": page,
+		"count":    len(page),
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+		"order":    sortOrder,
+	})
+}
+
 // nullableString は空文字列を JSON null として表現するためのヘルパ。
 // フィルタ未指定を明示するため、`""` ではなく `null` を返す。
 func nullableString(s string) interface{} {
@@ -613,6 +700,9 @@ func main() {
 			json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
 		}
 	})
+	// distinct な channel 一覧。`GET /api/messages/{id}` ワイルドカードよりも
+	// リテラルパターンが優先されるため、`channels` を ID として誤解されない。
+	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
 	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
 	// `/api/messages/{id}` (単一) は別経路として共存する。
 	mux.HandleFunc("GET /api/messages/{id}", getMessageByIDHandler)

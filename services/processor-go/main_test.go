@@ -1421,3 +1421,227 @@ func TestGetMessageByID_DoesNotMisMatchWithinSameChannel(t *testing.T) {
 		t.Errorf("expected payload p1, got %s", got.Payload)
 	}
 }
+
+// --- GET /api/messages/channels ---
+
+func seedChannels(t *testing.T) {
+	t.Helper()
+	resetMessages()
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mu.Lock()
+	messages = []Message{
+		{ID: "id-1", Channel: "alerts", Payload: "server down", Processed: true, CreatedAt: now},
+		{ID: "id-2", Channel: "orders", Payload: "new order", Processed: true, CreatedAt: now.Add(time.Second)},
+		{ID: "id-3", Channel: "alerts", Payload: "back up", Processed: true, CreatedAt: now.Add(2 * time.Second)},
+		{ID: "id-4", Channel: "billing", Payload: "invoice paid", Processed: true, CreatedAt: now.Add(3 * time.Second)},
+	}
+	mu.Unlock()
+}
+
+func TestMessageChannels_ReturnsEmptyForEmptyStore(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	channels, ok := resp["channels"].([]interface{})
+	if !ok {
+		t.Fatalf("expected channels array, got %T", resp["channels"])
+	}
+	if len(channels) != 0 {
+		t.Errorf("expected empty channels, got %v", channels)
+	}
+	if total, _ := resp["total"].(float64); total != 0 {
+		t.Errorf("expected total=0, got %v", resp["total"])
+	}
+}
+
+func TestMessageChannels_DistinctAndSortedAsc(t *testing.T) {
+	seedChannels(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	channels, _ := resp["channels"].([]interface{})
+	got := []string{}
+	for _, v := range channels {
+		got = append(got, v.(string))
+	}
+	want := []string{"alerts", "billing", "orders"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d channels %v, got %d %v", len(want), want, len(got), got)
+	}
+	for i, c := range want {
+		if got[i] != c {
+			t.Errorf("position %d: expected %s, got %s", i, c, got[i])
+		}
+	}
+}
+
+func TestMessageChannels_OrderDesc(t *testing.T) {
+	seedChannels(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels?order=desc", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	channels, _ := resp["channels"].([]interface{})
+	if len(channels) != 3 || channels[0].(string) != "orders" || channels[2].(string) != "alerts" {
+		t.Errorf("expected [orders billing alerts], got %v", channels)
+	}
+}
+
+func TestMessageChannels_RejectsInvalidOrder(t *testing.T) {
+	seedChannels(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels?order=weird", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessageChannels_Pagination(t *testing.T) {
+	seedChannels(t)
+	// limit=2 offset=1 で asc 順 [alerts billing orders] の中間→末尾を取る
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels?limit=2&offset=1", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	channels, _ := resp["channels"].([]interface{})
+	if len(channels) != 2 || channels[0].(string) != "billing" || channels[1].(string) != "orders" {
+		t.Errorf("expected [billing orders], got %v", channels)
+	}
+	if total, _ := resp["total"].(float64); total != 3 {
+		t.Errorf("expected total=3 (distinct), got %v", resp["total"])
+	}
+}
+
+func TestMessageChannels_QFilterMatchesChannelName(t *testing.T) {
+	seedChannels(t)
+	// q=alert は channel 名 alerts に部分一致
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels?q=alert", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	channels, _ := resp["channels"].([]interface{})
+	if len(channels) != 1 || channels[0].(string) != "alerts" {
+		t.Errorf("expected [alerts], got %v", channels)
+	}
+}
+
+func TestMessageChannels_QFilterMatchesPayload(t *testing.T) {
+	seedChannels(t)
+	// q=invoice は billing channel のメッセージ payload に部分一致 → distinct で billing のみ返る
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels?q=invoice", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	channels, _ := resp["channels"].([]interface{})
+	if len(channels) != 1 || channels[0].(string) != "billing" {
+		t.Errorf("expected [billing], got %v", channels)
+	}
+}
+
+func TestMessageChannels_SinceUntilFilter(t *testing.T) {
+	seedChannels(t)
+	// id-2 (orders) の時刻のみを含む窓 → distinct=[orders]
+	since := time.Date(2030, 1, 1, 12, 0, 1, 0, time.UTC).Format(time.RFC3339)
+	until := time.Date(2030, 1, 1, 12, 0, 1, 0, time.UTC).Format(time.RFC3339)
+	url := "/api/messages/channels?since=" + since + "&until=" + until
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	channels, _ := resp["channels"].([]interface{})
+	if len(channels) != 1 || channels[0].(string) != "orders" {
+		t.Errorf("expected [orders], got %v", channels)
+	}
+}
+
+func TestMessageChannels_RejectsInvalidSince(t *testing.T) {
+	seedChannels(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessageChannels_RejectsSinceGreaterThanUntil(t *testing.T) {
+	seedChannels(t)
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/messages/channels?since=2030-01-02T00:00:00Z&until=2030-01-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	messageChannelsHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessageChannels_RejectsNonGETMethods(t *testing.T) {
+	seedChannels(t)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		req := httptest.NewRequest(method, "/api/messages/channels", nil)
+		w := httptest.NewRecorder()
+		messageChannelsHandler(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("method %s: expected 405, got %d", method, w.Code)
+		}
+	}
+}
+
+// 経路の衝突回避を End-to-End で確認する。
+// `GET /api/messages/channels` リテラルパターンは `GET /api/messages/{id}` ワイルドカードに
+// 優先されるため、`channels` が `id` として解釈されない。
+func TestMessageChannels_DoesNotCollideWithIDRoute(t *testing.T) {
+	seedChannels(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
+	mux.HandleFunc("GET /api/messages/{id}", getMessageByIDHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/channels", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from channels handler, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// channels handler は "channels" キーを返す。getMessageByIDHandler なら "error" を返す。
+	if _, ok := resp["channels"]; !ok {
+		t.Errorf("expected channels key (channels handler), got %v", resp)
+	}
+}
