@@ -368,6 +368,106 @@ def list_event_names():
     })
 
 
+@app.route("/api/events/names/<path:name>", methods=["GET"])
+def event_name_detail(name: str):
+    """単一の event_name に対する集約詳細を返す。
+
+    `/api/events/names` は distinct 名一覧のみを返すのに対し、こちらは「名前 1 つ
+    分の詳細」を返す。`/api/events/summary?event_name=...` でも件数は得られるが、
+    `first_seen` / `last_seen` / `latest_properties` / `distinct_property_keys` は
+    summary には含まれないため、イベント名のドリルダウン UI で複数リクエストに
+    分解せず 1 リクエストで描画できるようにする。
+
+    クエリ:
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ（既存と同じパース）
+
+    戻り値:
+    - `event_name`: 入力された name（フィルタ後 0 件でも 404 になる前にエコーは不要）
+    - `count`: フィルタ後の件数
+    - `first_seen` / `last_seen`: ISO8601 文字列。timestamp 昇順での最小/最大
+    - `latest_properties`: `last_seen` の event の `properties`（無ければ `{}`）
+    - `distinct_property_keys`: フィルタ後の全 event の properties 内に出現したキー（ソート済み）
+
+    フィルタ後にレコードが 1 件も無ければ 404 を返す。
+    """
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on name detail: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on name detail: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    # name は事故防止のため `strip()` のみで正規化（大小文字は区別する）。
+    # 既存の event_name 完全一致 (`list_events?event_name=...`) と同じ挙動。
+    normalized_name = name.strip()
+    if not normalized_name:
+        return jsonify({"error": "event_name must not be blank"}), 400
+    if len(normalized_name) > MAX_EVENT_NAME_LENGTH:
+        return jsonify({
+            "error": "event_name is too long",
+            "max_length": MAX_EVENT_NAME_LENGTH,
+        }), 400
+
+    with events_lock:
+        snapshot = list(events_store)
+    matched = [e for e in snapshot if e.get("event_name") == normalized_name]
+    matched = _filter_events_by_time(matched, since, until)
+    if not matched:
+        logger.info("No events for name=%s (since=%s until=%s)", normalized_name, since_raw, until_raw)
+        return jsonify({"error": f"No events found for '{normalized_name}'"}), 404
+
+    # first_seen / last_seen は timestamp の昇順最小/最大で求める。
+    # `_filter_events_by_time` が壊れた timestamp を弾いているので、ここでは
+    # 文字列 ISO8601 ソートで安全に最小/最大を取れる（タイムゾーン揃いの保証は無いが、
+    # POST 時に UTC 固定で書き込んでいるため実運用では問題ない）。
+    timestamps = [e.get("timestamp", "") for e in matched if isinstance(e.get("timestamp"), str)]
+    timestamps.sort()
+    first_seen = timestamps[0] if timestamps else None
+    last_seen = timestamps[-1] if timestamps else None
+
+    # latest_properties は last_seen を持つレコードの properties（複数あれば最後に見たもの）。
+    latest_properties: dict = {}
+    if last_seen is not None:
+        for e in matched:
+            if e.get("timestamp") == last_seen:
+                props = e.get("properties")
+                if isinstance(props, dict):
+                    latest_properties = props
+                # 同一 timestamp の重複があれば後勝ち（FIFO 順で書き込まれているため、
+                # ループの最後に見るのが「実時間で最後の観測」になる）
+
+    # 全レコードの properties キーをユニオンしてソートして返す。
+    keys: set[str] = set()
+    for e in matched:
+        props = e.get("properties")
+        if isinstance(props, dict):
+            keys.update(k for k in props.keys() if isinstance(k, str))
+
+    logger.info(
+        "Returned detail for event_name=%s (count=%d, distinct_keys=%d)",
+        normalized_name, len(matched), len(keys),
+    )
+    return jsonify({
+        "event_name": normalized_name,
+        "count": len(matched),
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "latest_properties": latest_properties,
+        "distinct_property_keys": sorted(keys),
+    })
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")
