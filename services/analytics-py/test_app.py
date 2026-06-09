@@ -668,3 +668,116 @@ def test_event_names_does_not_collide_with_summary(client):
     assert summary_resp.status_code == 200
     assert "summary" in summary_resp.get_json()
     assert summary_resp.get_json()["summary"] == {"click": 2, "view": 1}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/events/names/<name> — 単一 event_name の集約詳細
+# ---------------------------------------------------------------------------
+
+
+def test_event_name_detail_not_found(client):
+    resp = client.get("/api/events/names/missing_event")
+    assert resp.status_code == 404
+    assert "No events found" in resp.get_json()["error"]
+
+
+def test_event_name_detail_basic_aggregate(client):
+    client.post("/api/events", json={"event_name": "click", "properties": {"page": "/home"}})
+    client.post("/api/events", json={"event_name": "click", "properties": {"page": "/about", "user": "u1"}})
+    client.post("/api/events", json={"event_name": "scroll"})
+
+    resp = client.get("/api/events/names/click")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["event_name"] == "click"
+    assert data["count"] == 2
+    assert data["first_seen"] is not None
+    assert data["last_seen"] is not None
+    # latest_properties は POST 順で末尾のもの (page=/about, user=u1)
+    assert data["latest_properties"] == {"page": "/about", "user": "u1"}
+    # distinct_property_keys は両イベントの全キーの和集合
+    assert data["distinct_property_keys"] == ["page", "user"]
+
+
+def test_event_name_detail_first_seen_le_last_seen(client):
+    client.post("/api/events", json={"event_name": "click"})
+    client.post("/api/events", json={"event_name": "click"})
+    client.post("/api/events", json={"event_name": "click"})
+
+    resp = client.get("/api/events/names/click")
+    data = resp.get_json()
+    assert data["first_seen"] <= data["last_seen"]
+
+
+def test_event_name_detail_excludes_other_names(client):
+    client.post("/api/events", json={"event_name": "click", "properties": {"a": "1"}})
+    client.post("/api/events", json={"event_name": "scroll", "properties": {"b": "2"}})
+
+    resp = client.get("/api/events/names/click")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 1
+    # scroll の properties キーが混ざってはいけない
+    assert data["distinct_property_keys"] == ["a"]
+
+
+def test_event_name_detail_empty_properties(client):
+    # properties が None / 欠落でも安全に扱える
+    client.post("/api/events", json={"event_name": "click"})
+    resp = client.get("/api/events/names/click")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 1
+    assert data["distinct_property_keys"] == []
+    assert data["latest_properties"] == {}
+
+
+def test_event_name_detail_since_until_filters_out_all(client):
+    client.post("/api/events", json={"event_name": "click"})
+    # 未来の since を指定して、ヒット 0 件 → 404
+    resp = client.get("/api/events/names/click?since=2999-01-01T00:00:00Z")
+    assert resp.status_code == 404
+
+
+def test_event_name_detail_since_filters_partial(client):
+    # 全件ヒットの since にすればちゃんと残る (実時刻ベースなので過去 since)
+    client.post("/api/events", json={"event_name": "click"})
+    resp = client.get("/api/events/names/click?since=2000-01-01T00:00:00Z")
+    assert resp.status_code == 200
+    assert resp.get_json()["count"] == 1
+
+
+def test_event_name_detail_invalid_since(client):
+    client.post("/api/events", json={"event_name": "click"})
+    resp = client.get("/api/events/names/click?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_event_name_detail_since_greater_than_until(client):
+    client.post("/api/events", json={"event_name": "click"})
+    resp = client.get(
+        "/api/events/names/click?since=2030-01-01T00:00:00Z&until=2020-01-01T00:00:00Z",
+    )
+    assert resp.status_code == 400
+    assert "'since' must be less than or equal to 'until'" in resp.get_json()["error"]
+
+
+def test_event_name_detail_does_not_collide_with_names_listing(client):
+    # `/api/events/names` (静的) と `/api/events/names/<name>` (動的) が共存することの回帰。
+    # 名前が "names" でも適切に動的ルートにマッチすること。
+    client.post("/api/events", json={"event_name": "names"})
+    listing = client.get("/api/events/names")
+    assert listing.status_code == 200
+    assert "names" in listing.get_json()
+    detail = client.get("/api/events/names/names")
+    assert detail.status_code == 200
+    body = detail.get_json()
+    assert body["event_name"] == "names"
+    assert body["count"] == 1
+
+
+def test_event_name_detail_blank_name(client):
+    # path に空文字（trim 後）は通常 Flask 側で 404 になるが、空白のみだった場合の
+    # 防御として 400 が返ることを確認。
+    resp = client.get("/api/events/names/%20%20")
+    assert resp.status_code == 400
