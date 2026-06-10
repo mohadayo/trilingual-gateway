@@ -1645,3 +1645,152 @@ func TestMessageChannels_DoesNotCollideWithIDRoute(t *testing.T) {
 		t.Errorf("expected channels key (channels handler), got %v", resp)
 	}
 }
+
+// === DELETE /api/messages/{id} ===
+
+func TestDeleteMessageByID_Success(t *testing.T) {
+	seeded := seedThreeMessages(t)
+	target := seeded[1] // id-2
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/messages/id-2", nil)
+	req.SetPathValue("id", target.ID)
+	w := httptest.NewRecorder()
+	deleteMessageByIDHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if resp["deleted"].(float64) != 1 {
+		t.Errorf("expected deleted=1, got %v", resp["deleted"])
+	}
+	if resp["id"].(string) != target.ID {
+		t.Errorf("expected id=%s, got %v", target.ID, resp["id"])
+	}
+	msg, ok := resp["message"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected message object in response, got %T", resp["message"])
+	}
+	if msg["payload"].(string) != target.Payload {
+		t.Errorf("expected payload=%s, got %v", target.Payload, msg["payload"])
+	}
+
+	// 残った 2 件の順序が保たれていること
+	mu.RLock()
+	got := make([]string, len(messages))
+	for i, m := range messages {
+		got[i] = m.ID
+	}
+	mu.RUnlock()
+	if len(got) != 2 || got[0] != "id-1" || got[1] != "id-3" {
+		t.Errorf("expected [id-1 id-3], got %v", got)
+	}
+}
+
+func TestDeleteMessageByID_NotFound(t *testing.T) {
+	seedThreeMessages(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/messages/does-not-exist", nil)
+	req.SetPathValue("id", "does-not-exist")
+	w := httptest.NewRecorder()
+	deleteMessageByIDHandler(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	mu.RLock()
+	count := len(messages)
+	mu.RUnlock()
+	if count != 3 {
+		t.Errorf("expected 3 remaining (unchanged), got %d", count)
+	}
+}
+
+func TestDeleteMessageByID_BlankIDReturns404(t *testing.T) {
+	seedThreeMessages(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/messages/", nil)
+	req.SetPathValue("id", "   ")
+	w := httptest.NewRecorder()
+	deleteMessageByIDHandler(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for blank id, got %d", w.Code)
+	}
+}
+
+func TestDeleteMessageByID_DoesNotInterfereWithGetSamePath(t *testing.T) {
+	// 同 path で GET と DELETE は別ハンドラ。DELETE 後の GET は 404。
+	seedThreeMessages(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/messages/{id}", getMessageByIDHandler)
+	mux.HandleFunc("DELETE /api/messages/{id}", deleteMessageByIDHandler)
+
+	// 削除前 GET 成功
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/messages/id-1", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("pre-delete GET expected 200, got %d", w.Code)
+		}
+	}
+	// DELETE
+	{
+		req := httptest.NewRequest(http.MethodDelete, "/api/messages/id-1", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("delete expected 200, got %d", w.Code)
+		}
+	}
+	// 削除後 GET は 404
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/messages/id-1", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("post-delete GET expected 404, got %d", w.Code)
+		}
+	}
+}
+
+func TestDeleteMessageByID_FilterDeleteRouteUnchanged(t *testing.T) {
+	// DELETE /api/messages?channel= (フィルタ) と DELETE /api/messages/{id} (単発) は
+	// path が異なるため衝突しない。フィルタ側が依然として動作することを回帰する。
+	seedThreeMessages(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleteMessagesHandler(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("DELETE /api/messages/{id}", deleteMessageByIDHandler)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/messages?channel=alpha", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("filter delete expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["deleted"].(float64) != 2 {
+		t.Errorf("expected deleted=2 (alpha channel had 2), got %v", resp["deleted"])
+	}
+}
+
+func TestDeleteMessageByID_PutReturns405ViaRouter(t *testing.T) {
+	seedThreeMessages(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/messages/{id}", getMessageByIDHandler)
+	mux.HandleFunc("DELETE /api/messages/{id}", deleteMessageByIDHandler)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/messages/id-1", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}

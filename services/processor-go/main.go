@@ -642,6 +642,46 @@ func getMessageByIDHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(ErrorResponse{Error: "message not found"})
 }
 
+// deleteMessageByIDHandler は DELETE /api/messages/{id} を処理する。
+// id 完全一致の 1 件を削除し、削除前のメッセージを返す（クライアントは
+// 別 GET なしで監査ログに残せる）。残ったメッセージの順序は保持する。
+func deleteMessageByIDHandler(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "message not found"})
+		return
+	}
+
+	mu.Lock()
+	var removed *Message
+	for i := range messages {
+		if messages[i].ID == id {
+			m := messages[i]
+			removed = &m
+			messages = append(messages[:i], messages[i+1:]...)
+			break
+		}
+	}
+	mu.Unlock()
+
+	if removed == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "message not found"})
+		return
+	}
+
+	logger.Printf("Message deleted: id=%s channel=%s", removed.ID, removed.Channel)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"deleted": 1,
+		"id":      removed.ID,
+		"message": removed,
+	})
+}
+
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -705,7 +745,9 @@ func main() {
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
 	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
 	// `/api/messages/{id}` (単一) は別経路として共存する。
+	// 単一 path で GET と DELETE は別ハンドラに振り分け、URL 設計をシンメトリックに保つ。
 	mux.HandleFunc("GET /api/messages/{id}", getMessageByIDHandler)
+	mux.HandleFunc("DELETE /api/messages/{id}", deleteMessageByIDHandler)
 	mux.HandleFunc("/api/stats", statsHandler)
 
 	srv := &http.Server{
