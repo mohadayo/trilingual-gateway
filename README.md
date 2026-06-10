@@ -113,6 +113,7 @@ curl "http://localhost:8001/api/events/names?q=page&order=desc"
 | GET | `/api/messages` | List messages with filtering / pagination / sorting (see params below) |
 | GET | `/api/messages/{id}` | Get a single message by ID（該当なしは `404`） |
 | DELETE | `/api/messages` | `channel` / `since` / `before` の AND で一致するメッセージを削除（少なくとも 1 フィルタ必須。`since` は包含、`before` は排他で半開区間 `[since, before)` を表現） |
+| DELETE | `/api/messages/{id}` | 単一メッセージを ID 指定で削除。レスポンスに削除前のメッセージ内容を含め、別 GET なしで監査ログに残せる。該当なしは `404` |
 | GET | `/api/stats` | Message count per channel（`?channel=` / `?q=` / `?since=` / `?until=` でフィルタ後の集計を返す） |
 
 **`GET /api/messages` query parameters:**
