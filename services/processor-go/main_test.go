@@ -1014,6 +1014,167 @@ func TestStatsHandlerNoFiltersReturnsAll(t *testing.T) {
 	}
 }
 
+func TestStatsHandlerEmptyStoreReturnsNullsAndZeroDistinct(t *testing.T) {
+	// 空ストア時: distinct_channels は 0、oldest / newest は null（nil）になること。
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total_messages"].(float64)) != 0 {
+		t.Fatalf("expected 0 total, got %v", resp["total_messages"])
+	}
+	if int(resp["distinct_channels"].(float64)) != 0 {
+		t.Fatalf("expected distinct_channels=0, got %v", resp["distinct_channels"])
+	}
+	if v, ok := resp["oldest"]; !ok || v != nil {
+		t.Fatalf("expected oldest=null, got %v (present=%v)", v, ok)
+	}
+	if v, ok := resp["newest"]; !ok || v != nil {
+		t.Fatalf("expected newest=null, got %v (present=%v)", v, ok)
+	}
+}
+
+func TestStatsHandlerOldestNewestAcrossAllMessages(t *testing.T) {
+	// `oldest` / `newest` がフィルタ通過後の CreatedAt 最小・最大を返すこと、
+	// `distinct_channels` が channels マップのキー数と一致することを回帰する。
+	resetMessages()
+	mu.Lock()
+	t1 := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2030, 6, 1, 12, 0, 0, 0, time.UTC)
+	t3 := time.Date(2030, 12, 31, 23, 59, 59, 0, time.UTC)
+	messages = []Message{
+		{ID: "1", Channel: "a", Payload: "p1", CreatedAt: t2},
+		{ID: "2", Channel: "a", Payload: "p2", CreatedAt: t1},
+		{ID: "3", Channel: "b", Payload: "p3", CreatedAt: t3},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if int(resp["total_messages"].(float64)) != 3 {
+		t.Fatalf("expected 3 total, got %v", resp["total_messages"])
+	}
+	// distinct_channels はマップキー数と一致する
+	if int(resp["distinct_channels"].(float64)) != 2 {
+		t.Fatalf("expected distinct_channels=2, got %v", resp["distinct_channels"])
+	}
+	// oldest=t1, newest=t3（投入順ではなく時刻で最小・最大を取る）
+	if resp["oldest"].(string) != t1.Format(time.RFC3339Nano) {
+		t.Fatalf("expected oldest=%s, got %v", t1.Format(time.RFC3339Nano), resp["oldest"])
+	}
+	if resp["newest"].(string) != t3.Format(time.RFC3339Nano) {
+		t.Fatalf("expected newest=%s, got %v", t3.Format(time.RFC3339Nano), resp["newest"])
+	}
+}
+
+func TestStatsHandlerOldestNewestReflectsChannelFilter(t *testing.T) {
+	// channel フィルタが効いた時、`oldest` / `newest` は通過した channel=b の
+	// メッセージのみで決まる（全件の最小・最大ではない）。
+	resetMessages()
+	mu.Lock()
+	t1 := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC)
+	t3 := time.Date(2030, 12, 31, 0, 0, 0, 0, time.UTC)
+	messages = []Message{
+		{ID: "1", Channel: "a", Payload: "p1", CreatedAt: t1}, // 除外される
+		{ID: "2", Channel: "b", Payload: "p2", CreatedAt: t2},
+		{ID: "3", Channel: "b", Payload: "p3", CreatedAt: t3},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?channel=b", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total_messages"].(float64)) != 2 {
+		t.Fatalf("expected 2 total for channel=b, got %v", resp["total_messages"])
+	}
+	if int(resp["distinct_channels"].(float64)) != 1 {
+		t.Fatalf("expected distinct_channels=1, got %v", resp["distinct_channels"])
+	}
+	if resp["oldest"].(string) != t2.Format(time.RFC3339Nano) {
+		t.Fatalf("expected oldest=%s (channel=b only), got %v", t2.Format(time.RFC3339Nano), resp["oldest"])
+	}
+	if resp["newest"].(string) != t3.Format(time.RFC3339Nano) {
+		t.Fatalf("expected newest=%s (channel=b only), got %v", t3.Format(time.RFC3339Nano), resp["newest"])
+	}
+}
+
+func TestStatsHandlerOldestNewestSingleMessage(t *testing.T) {
+	// 1 件しかマッチしない場合、oldest と newest は同じ時刻になる（初期化 + 更新ロジックの境界）。
+	resetMessages()
+	mu.Lock()
+	t1 := time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC)
+	messages = []Message{
+		{ID: "1", Channel: "solo", Payload: "p", CreatedAt: t1},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["oldest"] != resp["newest"] {
+		t.Fatalf("expected oldest==newest for single message, got oldest=%v newest=%v",
+			resp["oldest"], resp["newest"])
+	}
+	if resp["oldest"].(string) != t1.Format(time.RFC3339Nano) {
+		t.Fatalf("expected oldest=%s, got %v", t1.Format(time.RFC3339Nano), resp["oldest"])
+	}
+}
+
+func TestStatsHandlerOldestNewestNullWhenFilterMatchesNothing(t *testing.T) {
+	// 全件存在するが filter に一件もヒットしないケース。
+	// total_messages=0 / distinct_channels=0 / oldest=null / newest=null を返す。
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "1", Channel: "a", Payload: "p", CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?channel=nonexistent", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["total_messages"].(float64)) != 0 {
+		t.Fatalf("expected 0 total, got %v", resp["total_messages"])
+	}
+	if int(resp["distinct_channels"].(float64)) != 0 {
+		t.Fatalf("expected distinct_channels=0, got %v", resp["distinct_channels"])
+	}
+	if v := resp["oldest"]; v != nil {
+		t.Fatalf("expected oldest=null, got %v", v)
+	}
+	if v := resp["newest"]; v != nil {
+		t.Fatalf("expected newest=null, got %v", v)
+	}
+}
+
 // seedDeletableMessages は削除テスト用に固定の CreatedAt を持つメッセージ群を直接挿入する。
 func seedDeletableMessages() {
 	mu.Lock()
