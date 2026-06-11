@@ -703,19 +703,50 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 
 	channels := make(map[string]int)
 	total := 0
+	// `oldest` / `newest` は集計対象（フィルタ通過後）の CreatedAt の最小・最大を
+	// 1 スキャンで計算する。フィルタ条件下で「どの時間範囲のデータが残っているか」を
+	// クライアントが追加クエリ無しに把握できるようにするため。
+	// total==0 のとき (oldest, newest) は zero value のままになるが、出力時に
+	// `nullableTime` で null に正規化する。
+	var oldest, newest time.Time
 	for _, m := range messages {
 		if !filters.matches(m) {
 			continue
 		}
 		channels[m.Channel]++
 		total++
+		// 最初のマッチで初期化、以降は単純な比較で更新する。
+		if total == 1 {
+			oldest = m.CreatedAt
+			newest = m.CreatedAt
+			continue
+		}
+		if m.CreatedAt.Before(oldest) {
+			oldest = m.CreatedAt
+		}
+		if m.CreatedAt.After(newest) {
+			newest = m.CreatedAt
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_messages": total,
-		"channels":       channels,
+		"total_messages":    total,
+		"channels":          channels,
+		"distinct_channels": len(channels),
+		"oldest":            nullableTime(oldest, total),
+		"newest":            nullableTime(newest, total),
 	})
+}
+
+// nullableTime はフィルタ通過件数 0 件のとき null を、そうでなければ
+// RFC3339Nano の ISO8601 文字列を返す。`json.Encode` 時に
+// `interface{}` 経由で nil なら "null"、文字列なら "..." として出力される。
+func nullableTime(t time.Time, count int) interface{} {
+	if count == 0 {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 func main() {
