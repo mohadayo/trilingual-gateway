@@ -124,7 +124,24 @@ curl "http://localhost:8001/api/events/names?q=page&order=desc"
 - `sort`: `created_at`（既定）/ `channel` / `id`
 - `order`: `asc`（既定）/ `desc`
 
-**`GET /api/stats` query parameters:** `channel` / `q` / `since` / `until` を `/api/messages` と同じセマンティクスで受け付け、フィルタ後のメッセージから `total_messages` とチャンネル別件数を集計する。GET 以外のメソッドは 405。
+**`GET /api/stats` query parameters:** `channel` / `q` / `since` / `until` を `/api/messages` と同じセマンティクスで受け付け、フィルタ後のメッセージから集計値を返す。GET 以外のメソッドは 405。
+
+レスポンス形：
+
+```json
+{
+  "total_messages": 12,
+  "channels": {"alerts": 9, "info": 3},
+  "distinct_channels": 2,
+  "oldest": "2030-01-01T00:00:00Z",
+  "newest": "2030-12-31T23:59:59Z"
+}
+```
+
+- `distinct_channels`: フィルタ通過後に登場した channel のユニーク数（`channels` マップのキー数と一致）
+- `oldest` / `newest`: フィルタ通過後の `created_at` の最小・最大（RFC 3339）。マッチ 0 件のときは両方とも `null`。クライアントが追加クエリ無しに「いまフィルタ条件で残っているデータの時間範囲」を把握できる
+
+集計は 1 スキャンで行うため、フィルタが付いても挙動コストは従来と変わらない。
 
 **Validation rules (POST):**
 - `channel`: 必須、トリム後 1〜`MAX_CHANNEL_LENGTH`（既定 256）文字
