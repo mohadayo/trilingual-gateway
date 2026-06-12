@@ -735,4 +735,91 @@ describe("GET /api/users/count", () => {
     expect(res.body).toHaveProperty("by_role");
     expect(res.body).not.toHaveProperty("error");
   });
+
+  it("returns null oldest/newest on empty store", async () => {
+    // 0 件のときは oldest_created_at / newest_created_at は null
+    // （processor-go の oldest/newest と同じ「観測なし=null」セマンティクス）。
+    const res = await request(app).get("/api/users/count");
+    expect(res.status).toBe(200);
+    expect(res.body.oldest_created_at).toBeNull();
+    expect(res.body.newest_created_at).toBeNull();
+  });
+
+  it("returns same oldest/newest for a single user", async () => {
+    // 1 件のみのときは oldest と newest が一致し、その値は user.created_at に等しい。
+    const created = await request(app)
+      .post("/api/users")
+      .send({ username: "u1", email: "u1@example.com" });
+    expect(created.status).toBe(201);
+    const res = await request(app).get("/api/users/count");
+    expect(res.body.total).toBe(1);
+    expect(res.body.oldest_created_at).toBe(created.body.created_at);
+    expect(res.body.newest_created_at).toBe(created.body.created_at);
+  });
+
+  it("tracks min and max created_at across multiple users", async () => {
+    // 連続作成で created_at が時間順に進むことを利用し、
+    // 最初の user が oldest、最後の user が newest になることを確認する。
+    const first = await request(app)
+      .post("/api/users")
+      .send({ username: "first", email: "first@example.com" });
+    // Date.now() の解像度はミリ秒単位。同一ミリ秒の衝突を避けるため微小待機。
+    await new Promise((r) => setTimeout(r, 5));
+    await request(app)
+      .post("/api/users")
+      .send({ username: "middle", email: "middle@example.com" });
+    await new Promise((r) => setTimeout(r, 5));
+    const last = await request(app)
+      .post("/api/users")
+      .send({ username: "last", email: "last@example.com" });
+
+    const res = await request(app).get("/api/users/count");
+    expect(res.body.total).toBe(3);
+    expect(res.body.oldest_created_at).toBe(first.body.created_at);
+    expect(res.body.newest_created_at).toBe(last.body.created_at);
+  });
+
+  it("recomputes oldest/newest after role filter", async () => {
+    // role=admin で絞ったとき、user ロールのレコードは oldest/newest 計算に含めない。
+    const adminA = await request(app)
+      .post("/api/users")
+      .send({ username: "a", email: "a@example.com", role: "admin" });
+    await new Promise((r) => setTimeout(r, 5));
+    await request(app)
+      .post("/api/users")
+      .send({ username: "regular", email: "regular@example.com", role: "user" });
+    await new Promise((r) => setTimeout(r, 5));
+    const adminB = await request(app)
+      .post("/api/users")
+      .send({ username: "b", email: "b@example.com", role: "admin" });
+
+    const res = await request(app).get("/api/users/count?role=admin");
+    expect(res.body.total).toBe(2);
+    expect(res.body.oldest_created_at).toBe(adminA.body.created_at);
+    expect(res.body.newest_created_at).toBe(adminB.body.created_at);
+  });
+
+  it("recomputes oldest/newest after since/until filter", async () => {
+    // 範囲外のレコードが oldest/newest に漏れないこと。
+    const earliest = await request(app)
+      .post("/api/users")
+      .send({ username: "earliest", email: "earliest@example.com" });
+    await new Promise((r) => setTimeout(r, 5));
+    const middle = await request(app)
+      .post("/api/users")
+      .send({ username: "middle", email: "middle@example.com" });
+    await new Promise((r) => setTimeout(r, 5));
+    const latest = await request(app)
+      .post("/api/users")
+      .send({ username: "latest", email: "latest@example.com" });
+
+    // since=middle.created_at で絞ると middle と latest だけ残る
+    const res = await request(app).get(
+      `/api/users/count?since=${encodeURIComponent(middle.body.created_at)}`,
+    );
+    expect(res.body.total).toBe(2);
+    expect(res.body.oldest_created_at).toBe(middle.body.created_at);
+    expect(res.body.newest_created_at).toBe(latest.body.created_at);
+    expect(res.body.oldest_created_at).not.toBe(earliest.body.created_at);
+  });
 });
