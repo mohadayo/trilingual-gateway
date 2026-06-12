@@ -435,10 +435,33 @@ app.get("/api/users/count", (req: Request, res: Response) => {
   for (const r of ALLOWED_ROLES) {
     byRole[r] = 0;
   }
+  // `created_at` の最小・最大を 1 スキャンで集計する（processor-go の
+  // `/api/stats` の `oldest`/`newest` と同じセマンティクス）。
+  // 0 件のときは null を返し、1 件以上のときは ISO8601 文字列に戻す。
+  // `Number.NaN` な `created_at`（壊れた値）は安全側に倒して無視する。
+  let oldestMs = Number.POSITIVE_INFINITY;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  let oldestIso: string | null = null;
+  let newestIso: string | null = null;
   for (const u of list) {
     byRole[u.role] = (byRole[u.role] ?? 0) + 1;
+    const t = new Date(u.created_at).getTime();
+    if (Number.isNaN(t)) continue;
+    if (t < oldestMs) {
+      oldestMs = t;
+      oldestIso = u.created_at;
+    }
+    if (t > newestMs) {
+      newestMs = t;
+      newestIso = u.created_at;
+    }
   }
-  res.json({ total: list.length, by_role: byRole });
+  res.json({
+    total: list.length,
+    by_role: byRole,
+    oldest_created_at: oldestIso,
+    newest_created_at: newestIso,
+  });
 });
 
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
