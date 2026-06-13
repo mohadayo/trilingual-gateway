@@ -781,3 +781,97 @@ def test_event_name_detail_blank_name(client):
     # 防御として 400 が返ることを確認。
     resp = client.get("/api/events/names/%20%20")
     assert resp.status_code == 400
+
+
+# ---- /api/events/count ----
+
+def _track(client, name: str, properties=None, t=None):
+    body = {"event_name": name}
+    if properties is not None:
+        body["properties"] = properties
+    resp = client.post("/api/events", json=body)
+    assert resp.status_code == 201
+
+
+def test_count_empty_store(client):
+    resp = client.get("/api/events/count")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_names": 0, "by_name": {}}
+
+
+def test_count_aggregates_by_name(client):
+    for n in ("signup", "click", "click", "click", "purchase"):
+        _track(client, n)
+    resp = client.get("/api/events/count")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 5
+    assert body["distinct_names"] == 3
+    assert body["by_name"] == {"signup": 1, "click": 3, "purchase": 1}
+
+
+def test_count_filters_by_event_name(client):
+    for n in ("signup", "click", "click"):
+        _track(client, n)
+    resp = client.get("/api/events/count?event_name=click")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_names"] == 1
+    assert body["by_name"] == {"click": 2}
+
+
+def test_count_filters_by_q_case_insensitive(client):
+    for n in ("ButtonClick", "buttonHover", "PageView"):
+        _track(client, n)
+    resp = client.get("/api/events/count?q=button")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_names"] == 2
+    assert "ButtonClick" in body["by_name"]
+    assert "buttonHover" in body["by_name"]
+
+
+def test_count_rejects_blank_q(client):
+    resp = client.get("/api/events/count?q=%20")
+    assert resp.status_code == 400
+
+
+def test_count_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/events/count?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_count_rejects_invalid_since(client):
+    resp = client.get("/api/events/count?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_count_rejects_since_greater_than_until(client):
+    resp = client.get(
+        "/api/events/count?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_count_returns_no_by_name_entry_for_zero(client):
+    # event_name=foo フィルタで一致 0 件の場合、by_name は {} のまま埋めない。
+    _track(client, "bar")
+    resp = client.get("/api/events/count?event_name=foo")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_names": 0, "by_name": {}}
+
+
+def test_count_combined_event_name_and_q(client):
+    # event_name (完全一致) と q (部分一致) を併用すると AND 条件になる。
+    _track(client, "ButtonClick")
+    _track(client, "ButtonHover")
+    resp = client.get("/api/events/count?event_name=ButtonClick&q=click")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_name"] == {"ButtonClick": 1}

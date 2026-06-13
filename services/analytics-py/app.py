@@ -468,6 +468,70 @@ def event_name_detail(name: str):
     })
 
 
+@app.route("/api/events/count", methods=["GET"])
+def count_events():
+    """保持中イベントの件数のみを返す軽量エンドポイント。
+
+    `/api/events/summary` は per-name 集計込みの応答を返すが、UI 側で
+    バッジ表示・ページャ初期化など「件数だけ知りたい」ケースには過剰。
+    本エンドポイントはレコード本体を返さず、`total` / `distinct_names` /
+    `by_name` の 3 つだけを返す。`by_name` は登場した event_name のみで、
+    count 0 のキーは埋めない（軽量化）。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ（既存 `/summary` と同じ）
+    - `q`: event_name の部分一致（大文字小文字無視、既存 `/summary` と同じ）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on count: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on count: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on count: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    by_name: dict[str, int] = {}
+    for event in filtered:
+        name = event["event_name"]
+        by_name[name] = by_name.get(name, 0) + 1
+
+    total = len(filtered)
+    logger.info(
+        "Count requested: total=%d distinct_names=%d (event_name=%s q=%s)",
+        total, len(by_name), event_name, q,
+    )
+    return jsonify({
+        "total": total,
+        "distinct_names": len(by_name),
+        "by_name": by_name,
+    })
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")
