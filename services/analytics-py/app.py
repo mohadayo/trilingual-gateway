@@ -532,6 +532,103 @@ def count_events():
     })
 
 
+@app.route("/api/events/property_keys", methods=["GET"])
+def list_property_keys():
+    """フィルタ後のイベントに登場した properties のキーと「そのキーを持つイベント件数」を返す。
+
+    `/api/events/names/<name>` の `distinct_property_keys` は特定の event_name に限定された
+    キー一覧しか返せないため、UI で「保持中の全イベントを横断して、どんな properties
+    キーが使われているか」を一覧したいケースで複数リクエストの集約が必要になる。
+    このエンドポイントは event_name に依存せず、フィルタ後の全イベントを横断して
+    properties キーとその出現件数を返す。1 イベント内で同じキーは 1 度だけ数えるため、
+    `count` は「そのキーを少なくとも 1 つ持つイベント数」になる。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ（既存 `/summary` `/count` と同じ）
+    - `q`: event_name の部分一致（大文字小文字無視、既存と同じ）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    - `order`: `asc` / `desc`（既定 `asc`、キー名の昇順）
+    - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用してページング
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    sort_order = request.args.get("order", "asc")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on property_keys: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order on property_keys: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
+
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on property_keys: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on property_keys: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    key_counts: dict[str, int] = {}
+    for event in filtered:
+        props = event.get("properties")
+        if not isinstance(props, dict):
+            continue
+        for key in {k for k in props.keys() if isinstance(k, str)}:
+            key_counts[key] = key_counts.get(key, 0) + 1
+
+    items = [{"key": k, "count": c} for k, c in key_counts.items()]
+    reverse = sort_order == "desc"
+    items.sort(key=lambda x: x["key"], reverse=reverse)
+
+    total = len(items)
+    page = items[offset:offset + limit]
+    logger.info(
+        "Property keys requested: total_events=%d distinct_keys=%d (event_name=%s q=%s)",
+        len(filtered), total, event_name, q,
+    )
+    return jsonify({
+        "total_events": len(filtered),
+        "distinct_property_keys": total,
+        "count": len(page),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "order": sort_order,
+        "property_keys": page,
+    })
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")
