@@ -875,3 +875,136 @@ def test_count_combined_event_name_and_q(client):
     body = resp.get_json()
     assert body["total"] == 1
     assert body["by_name"] == {"ButtonClick": 1}
+
+
+# ---- /api/events/property_keys ----
+
+def test_property_keys_empty_store(client):
+    resp = client.get("/api/events/property_keys")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total_events"] == 0
+    assert body["distinct_property_keys"] == 0
+    assert body["total"] == 0
+    assert body["count"] == 0
+    assert body["property_keys"] == []
+    assert body["order"] == "asc"
+
+
+def test_property_keys_distinct_aggregate(client):
+    client.post("/api/events", json={"event_name": "page_view", "properties": {"page": "/a", "user_id": 1}})
+    client.post("/api/events", json={"event_name": "page_view", "properties": {"page": "/b"}})
+    client.post("/api/events", json={"event_name": "click", "properties": {"element": "btn"}})
+    resp = client.get("/api/events/property_keys")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total_events"] == 3
+    assert body["distinct_property_keys"] == 3
+    keys = {item["key"]: item["count"] for item in body["property_keys"]}
+    assert keys == {"page": 2, "user_id": 1, "element": 1}
+
+
+def test_property_keys_dedup_within_single_event(client):
+    # 1 イベント内で同じキーが複数回登場しても 1 と数える（dict のキーはユニーク）。
+    client.post("/api/events", json={"event_name": "x", "properties": {"k": "v1"}})
+    client.post("/api/events", json={"event_name": "x", "properties": {"k": "v2"}})
+    resp = client.get("/api/events/property_keys")
+    body = resp.get_json()
+    keys = {item["key"]: item["count"] for item in body["property_keys"]}
+    assert keys == {"k": 2}
+
+
+def test_property_keys_ignores_non_dict_properties(client):
+    # properties が無い / dict でないイベントはスキップする（POST 時には弾かれるが
+    # 防御的にここでも保護していることを確認する）。
+    events_store.append({"event_name": "skipme", "properties": "not-a-dict", "timestamp": "2026-06-15T00:00:00+00:00"})
+    events_store.append({"event_name": "ok", "properties": {"valid": True}, "timestamp": "2026-06-15T00:00:00+00:00"})
+    resp = client.get("/api/events/property_keys")
+    body = resp.get_json()
+    assert body["distinct_property_keys"] == 1
+    assert body["property_keys"][0]["key"] == "valid"
+
+
+def test_property_keys_filters_by_event_name(client):
+    client.post("/api/events", json={"event_name": "wanted", "properties": {"a": 1}})
+    client.post("/api/events", json={"event_name": "other", "properties": {"b": 2}})
+    resp = client.get("/api/events/property_keys?event_name=wanted")
+    body = resp.get_json()
+    assert body["total_events"] == 1
+    keys = {item["key"] for item in body["property_keys"]}
+    assert keys == {"a"}
+
+
+def test_property_keys_filters_by_q_case_insensitive(client):
+    client.post("/api/events", json={"event_name": "ButtonClick", "properties": {"x": 1}})
+    client.post("/api/events", json={"event_name": "ScrollEvent", "properties": {"y": 1}})
+    resp = client.get("/api/events/property_keys?q=button")
+    body = resp.get_json()
+    assert body["total_events"] == 1
+    assert {item["key"] for item in body["property_keys"]} == {"x"}
+
+
+def test_property_keys_filters_by_since(client):
+    events_store.append({"event_name": "old", "properties": {"old_key": 1}, "timestamp": "2020-01-01T00:00:00+00:00"})
+    events_store.append({"event_name": "new", "properties": {"new_key": 1}, "timestamp": "2026-06-15T00:00:00+00:00"})
+    resp = client.get("/api/events/property_keys?since=2026-01-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total_events"] == 1
+    assert {item["key"] for item in body["property_keys"]} == {"new_key"}
+
+
+def test_property_keys_sort_order_desc(client):
+    client.post("/api/events", json={"event_name": "x", "properties": {"a": 1, "z": 1, "m": 1}})
+    resp = client.get("/api/events/property_keys?order=desc")
+    body = resp.get_json()
+    keys = [item["key"] for item in body["property_keys"]]
+    assert keys == ["z", "m", "a"]
+
+
+def test_property_keys_pagination(client):
+    client.post("/api/events", json={"event_name": "x", "properties": {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1}})
+    resp = client.get("/api/events/property_keys?limit=2&offset=1")
+    body = resp.get_json()
+    assert body["total"] == 5
+    assert body["count"] == 2
+    assert body["limit"] == 2
+    assert body["offset"] == 1
+    keys = [item["key"] for item in body["property_keys"]]
+    assert keys == ["b", "c"]
+
+
+def test_property_keys_rejects_blank_q(client):
+    resp = client.get("/api/events/property_keys?q=%20")
+    assert resp.status_code == 400
+
+
+def test_property_keys_rejects_overlong_q(client):
+    resp = client.get("/api/events/property_keys?q=" + ("a" * 1000))
+    assert resp.status_code == 400
+
+
+def test_property_keys_rejects_invalid_order(client):
+    resp = client.get("/api/events/property_keys?order=sideways")
+    assert resp.status_code == 400
+
+
+def test_property_keys_rejects_invalid_since(client):
+    resp = client.get("/api/events/property_keys?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_property_keys_rejects_since_greater_than_until(client):
+    resp = client.get(
+        "/api/events/property_keys?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_property_keys_event_with_no_matching_properties(client):
+    # event_name 完全一致が無い場合、distinct_property_keys は 0。
+    client.post("/api/events", json={"event_name": "real", "properties": {"k": 1}})
+    resp = client.get("/api/events/property_keys?event_name=missing")
+    body = resp.get_json()
+    assert body["total_events"] == 0
+    assert body["distinct_property_keys"] == 0
+    assert body["property_keys"] == []
