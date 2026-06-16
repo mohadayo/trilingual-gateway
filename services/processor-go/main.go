@@ -682,6 +682,69 @@ func deleteMessageByIDHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// statsTopChannelsDefaultLimit は /api/stats の top_channels フィールドの
+// デフォルト件数。クエリ `top_channels_limit` で上書き可能。
+const statsTopChannelsDefaultLimit = 5
+
+// statsTopChannelsMaxLimit は top_channels_limit の上限。極端な値で大きな
+// JSON ペイロードを返さないようにガードする。
+const statsTopChannelsMaxLimit = 100
+
+// parseTopChannelsLimit は ?top_channels_limit= クエリを解析する。
+// 未指定なら default、整数解釈不可・範囲外 (1..max) なら空エラー文字列の代わりに
+// 非空のエラー文字列を返す。呼び出し側で 400 にする。
+func parseTopChannelsLimit(raw string) (int, string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return statsTopChannelsDefaultLimit, ""
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, "top_channels_limit must be an integer"
+	}
+	if n < 1 || n > statsTopChannelsMaxLimit {
+		return 0, fmt.Sprintf(
+			"top_channels_limit must be between 1 and %d",
+			statsTopChannelsMaxLimit,
+		)
+	}
+	return n, ""
+}
+
+// topChannelsFromCounts は channel→count map から count 降順 (同 count はチャネル名
+// 昇順) で先頭 limit 件を `[{channel, count}, ...]` の形に整形する。
+// `limit <= 0` の場合は空配列を返す。
+func topChannelsFromCounts(counts map[string]int, limit int) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0)
+	if limit <= 0 || len(counts) == 0 {
+		return out
+	}
+	type kv struct {
+		channel string
+		count   int
+	}
+	items := make([]kv, 0, len(counts))
+	for ch, c := range counts {
+		items = append(items, kv{channel: ch, count: c})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count != items[j].count {
+			return items[i].count > items[j].count
+		}
+		return items[i].channel < items[j].channel
+	})
+	if limit > len(items) {
+		limit = len(items)
+	}
+	for _, it := range items[:limit] {
+		out = append(out, map[string]interface{}{
+			"channel": it.channel,
+			"count":   it.count,
+		})
+	}
+	return out
+}
+
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -690,11 +753,20 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filters, ferr := parseMessageFilters(r.URL.Query())
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
 	if ferr != "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	topLimit, terr := parseTopChannelsLimit(query.Get("top_channels_limit"))
+	if terr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: terr})
 		return
 	}
 
@@ -736,6 +808,7 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		"distinct_channels": len(channels),
 		"oldest":            nullableTime(oldest, total),
 		"newest":            nullableTime(newest, total),
+		"top_channels":      topChannelsFromCounts(channels, topLimit),
 	})
 }
 

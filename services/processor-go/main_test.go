@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1140,6 +1141,201 @@ func TestStatsHandlerOldestNewestSingleMessage(t *testing.T) {
 	}
 	if resp["oldest"].(string) != t1.Format(time.RFC3339Nano) {
 		t.Fatalf("expected oldest=%s, got %v", t1.Format(time.RFC3339Nano), resp["oldest"])
+	}
+}
+
+// /api/stats?top_channels_limit=... の top_channels フィールドを検証する。
+
+func TestStatsHandlerTopChannelsDefaultLimit(t *testing.T) {
+	// 7 つのチャネルを互いに異なる count で挿入し、デフォルト 5 件まで返ることを確認。
+	resetMessages()
+	mu.Lock()
+	messages = nil
+	counts := map[string]int{
+		"alpha": 7, "beta": 6, "gamma": 5, "delta": 4,
+		"epsilon": 3, "zeta": 2, "eta": 1,
+	}
+	now := time.Now().UTC()
+	for ch, n := range counts {
+		for i := 0; i < n; i++ {
+			messages = append(messages, Message{
+				ID: ch + "-" + strconv.Itoa(i), Channel: ch, Payload: "p", CreatedAt: now,
+			})
+		}
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	top, ok := resp["top_channels"].([]interface{})
+	if !ok {
+		t.Fatalf("top_channels missing or wrong type: %v", resp["top_channels"])
+	}
+	if len(top) != 5 {
+		t.Fatalf("expected 5 top channels (default limit), got %d", len(top))
+	}
+	// 最上位は alpha=7, 次は beta=6, ...
+	expected := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	for i, e := range expected {
+		entry := top[i].(map[string]interface{})
+		if entry["channel"] != e {
+			t.Errorf("position %d: expected %s, got %v", i, e, entry["channel"])
+		}
+	}
+}
+
+func TestStatsHandlerTopChannelsCustomLimit(t *testing.T) {
+	// top_channels_limit=2 で先頭 2 件のみ返る。
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "1", Channel: "a", CreatedAt: time.Now().UTC()},
+		{ID: "2", Channel: "a", CreatedAt: time.Now().UTC()},
+		{ID: "3", Channel: "b", CreatedAt: time.Now().UTC()},
+		{ID: "4", Channel: "c", CreatedAt: time.Now().UTC()},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?top_channels_limit=2", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	top := resp["top_channels"].([]interface{})
+	if len(top) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(top))
+	}
+	first := top[0].(map[string]interface{})
+	if first["channel"] != "a" || int(first["count"].(float64)) != 2 {
+		t.Errorf("unexpected first: %v", first)
+	}
+}
+
+func TestStatsHandlerTopChannelsTieBreakByName(t *testing.T) {
+	// 同 count はチャネル名昇順で並ぶ。
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "1", Channel: "zeta", CreatedAt: time.Now().UTC()},
+		{ID: "2", Channel: "alpha", CreatedAt: time.Now().UTC()},
+		{ID: "3", Channel: "mu", CreatedAt: time.Now().UTC()},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	top := resp["top_channels"].([]interface{})
+	got := []string{}
+	for _, t := range top {
+		got = append(got, t.(map[string]interface{})["channel"].(string))
+	}
+	expected := []string{"alpha", "mu", "zeta"}
+	for i, e := range expected {
+		if got[i] != e {
+			t.Errorf("position %d: expected %s, got %s", i, e, got[i])
+		}
+	}
+}
+
+func TestStatsHandlerTopChannelsEmptyStore(t *testing.T) {
+	// メッセージが無い場合は空配列を返す（null ではなく []）。
+	resetMessages()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	top, ok := resp["top_channels"].([]interface{})
+	if !ok {
+		t.Fatalf("top_channels missing or wrong type: %v", resp["top_channels"])
+	}
+	if len(top) != 0 {
+		t.Errorf("expected empty top_channels, got %d entries", len(top))
+	}
+}
+
+func TestStatsHandlerTopChannelsLimitOutOfRange(t *testing.T) {
+	resetMessages()
+	for _, v := range []string{"0", "-1", "abc", "9999"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/stats?top_channels_limit="+v, nil)
+		w := httptest.NewRecorder()
+		statsHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for top_channels_limit=%q, got %d", v, w.Code)
+		}
+	}
+}
+
+func TestStatsHandlerTopChannelsRespectsFilter(t *testing.T) {
+	// channel フィルタ適用後に top_channels が再計算される。
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "1", Channel: "a", CreatedAt: time.Now().UTC()},
+		{ID: "2", Channel: "a", CreatedAt: time.Now().UTC()},
+		{ID: "3", Channel: "b", CreatedAt: time.Now().UTC()},
+	}
+	mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?channel=b", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	top := resp["top_channels"].([]interface{})
+	if len(top) != 1 {
+		t.Fatalf("expected 1 entry after channel filter, got %d", len(top))
+	}
+	first := top[0].(map[string]interface{})
+	if first["channel"] != "b" {
+		t.Errorf("expected channel=b, got %v", first["channel"])
+	}
+}
+
+func TestParseTopChannelsLimitDefaults(t *testing.T) {
+	got, err := parseTopChannelsLimit("")
+	if err != "" {
+		t.Errorf("unexpected error: %s", err)
+	}
+	if got != statsTopChannelsDefaultLimit {
+		t.Errorf("expected default %d, got %d", statsTopChannelsDefaultLimit, got)
+	}
+	got, err = parseTopChannelsLimit("   ")
+	if err != "" {
+		t.Errorf("unexpected error for whitespace: %s", err)
+	}
+	if got != statsTopChannelsDefaultLimit {
+		t.Errorf("expected default for whitespace, got %d", got)
+	}
+}
+
+func TestTopChannelsFromCountsLimitClamp(t *testing.T) {
+	// limit > len(counts) のとき全件返ること。
+	got := topChannelsFromCounts(map[string]int{"a": 1, "b": 2}, 10)
+	if len(got) != 2 {
+		t.Errorf("expected 2 entries (clamped to len), got %d", len(got))
+	}
+	// limit <= 0 は空配列。
+	got = topChannelsFromCounts(map[string]int{"a": 1}, 0)
+	if len(got) != 0 {
+		t.Errorf("expected empty for limit=0, got %d", len(got))
+	}
+	got = topChannelsFromCounts(map[string]int{"a": 1}, -1)
+	if len(got) != 0 {
+		t.Errorf("expected empty for negative limit, got %d", len(got))
 	}
 }
 
