@@ -70,6 +70,8 @@ make lint          # Run all linters
 | DELETE | `/api/events` | Delete events by name (`?event_name=` required) |
 | GET | `/api/events/summary` | Aggregated event counts by name (filterable) |
 | GET | `/api/events/names` | distinct な event_name のみを返す軽量エンドポイント（フィルタドロップダウン / オートコンプリート用） |
+| GET | `/api/events/property_keys` | フィルタ後のイベントに登場した properties キー一覧（`event_name` / `q` / `since` / `until` / `order` / `limit` / `offset`） |
+| GET | `/api/events/property_values/<key>` | 指定キーの distinct 値とその出現回数（`event_name` / `q` / `since` / `until` / `sort=value\|count` / `order` / `limit` / `offset`、既定は `count desc`） |
 
 **`GET /api/events` query parameters:**
 - `event_name`: 完全一致でイベント名を絞り込み
