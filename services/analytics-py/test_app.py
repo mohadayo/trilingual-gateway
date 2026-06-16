@@ -1,1010 +1,841 @@
-import pytest
-from app import app, events_store
-
-
-@pytest.fixture(autouse=True)
-def clear_store():
-    events_store.clear()
-    yield
-    events_store.clear()
-
-
-@pytest.fixture
-def client():
-    app.config["TESTING"] = True
-    with app.test_client() as c:
-        yield c
-
-
-def test_health(client):
-    resp = client.get("/health")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["status"] == "ok"
-    assert data["service"] == "analytics-py"
-    assert "timestamp" in data
-
-
-def test_track_event(client):
-    resp = client.post("/api/events", json={"event_name": "page_view", "properties": {"page": "/home"}})
-    assert resp.status_code == 201
-    data = resp.get_json()
-    assert data["event"]["event_name"] == "page_view"
-
-
-def test_track_event_missing_name(client):
-    resp = client.post("/api/events", json={"properties": {"page": "/home"}})
-    assert resp.status_code == 400
-    assert "error" in resp.get_json()
-
-
-def test_track_event_empty_body(client):
-    resp = client.post("/api/events", content_type="application/json")
-    assert resp.status_code == 400
-
-
-def test_list_events(client):
-    client.post("/api/events", json={"event_name": "click"})
-    client.post("/api/events", json={"event_name": "click"})
-    client.post("/api/events", json={"event_name": "scroll"})
-    resp = client.get("/api/events")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 3
-    assert data["count"] == 3
-
-
-def test_list_events_filtered(client):
-    client.post("/api/events", json={"event_name": "filter_test"})
-    resp = client.get("/api/events?event_name=filter_test")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert all(e["event_name"] == "filter_test" for e in data["events"])
-
-
-def test_list_events_pagination_limit(client):
-    for i in range(5):
-        client.post("/api/events", json={"event_name": f"ev_{i}"})
-    resp = client.get("/api/events?limit=2")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 5
-    assert data["count"] == 2
-    assert data["limit"] == 2
-    assert data["offset"] == 0
-
-
-def test_list_events_pagination_offset(client):
-    for i in range(5):
-        client.post("/api/events", json={"event_name": f"ev_{i}"})
-    resp = client.get("/api/events?limit=2&offset=3")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 5
-    assert data["count"] == 2
-    assert data["offset"] == 3
-    assert data["events"][0]["event_name"] == "ev_3"
-
-
-def test_list_events_pagination_offset_beyond(client):
-    for i in range(3):
-        client.post("/api/events", json={"event_name": f"ev_{i}"})
-    resp = client.get("/api/events?limit=10&offset=10")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 3
-    assert data["count"] == 0
-
-
-def test_list_events_pagination_with_filter(client):
-    for i in range(4):
-        client.post("/api/events", json={"event_name": "target"})
-    client.post("/api/events", json={"event_name": "other"})
-    resp = client.get("/api/events?event_name=target&limit=2&offset=1")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 4
-    assert data["count"] == 2
-
-
-def test_list_events_negative_limit(client):
-    client.post("/api/events", json={"event_name": "neg"})
-    resp = client.get("/api/events?limit=-1")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 1
-    assert data["count"] == 1
-
-
-def test_list_events_negative_offset(client):
-    client.post("/api/events", json={"event_name": "neg"})
-    resp = client.get("/api/events?offset=-5")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["offset"] == 0
-
-
-def test_delete_events_success(client):
-    client.post("/api/events", json={"event_name": "to_delete"})
-    client.post("/api/events", json={"event_name": "to_delete"})
-    client.post("/api/events", json={"event_name": "keep"})
-
-    resp = client.delete("/api/events?event_name=to_delete")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["deleted_count"] == 2
-
-    list_resp = client.get("/api/events")
-    assert list_resp.get_json()["total"] == 1
-
-
-def test_delete_events_not_found(client):
-    # processor-go の DELETE /api/messages と同じく、フィルタ未マッチは 200 + deleted_count=0
-    resp = client.delete("/api/events?event_name=nonexistent")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["deleted_count"] == 0
-    assert data["event_name"] == "nonexistent"
-
-
-def test_delete_events_missing_param(client):
-    resp = client.delete("/api/events")
-    assert resp.status_code == 400
-    assert "at least one of" in resp.get_json()["error"]
-
-
-def test_delete_events_since(client):
-    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    resp = client.delete("/api/events?since=2024-01-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["deleted_count"] == 2
-    remaining = [e["event_name"] for e in events_store]
-    assert remaining == ["old"]
-
-
-def test_delete_events_until(client):
-    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    resp = client.delete("/api/events?until=2024-06-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["deleted_count"] == 2
-    remaining = [e["event_name"] for e in events_store]
-    assert remaining == ["new"]
-
-
-def test_delete_events_since_and_until_and_event_name(client):
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2025-06-01T00:00:00+00:00"})
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "scroll", "properties": {}, "timestamp": "2025-06-01T00:00:00+00:00"})
-    resp = client.delete(
-        "/api/events?event_name=click&since=2025-01-01T00:00:00Z&until=2025-12-31T23:59:59Z"
-    )
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["deleted_count"] == 1
-    remaining = sorted(e["event_name"] for e in events_store)
-    assert remaining == ["click", "click", "scroll"]
-
-
-def test_delete_events_invalid_since(client):
-    resp = client.delete("/api/events?since=not-a-date")
-    assert resp.status_code == 400
-    assert "since" in resp.get_json()["error"]
-
-
-def test_delete_events_since_greater_than_until(client):
-    resp = client.delete(
-        "/api/events?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z"
-    )
-    assert resp.status_code == 400
-    assert "since" in resp.get_json()["error"]
-
-
-def test_events_summary(client):
-    client.post("/api/events", json={"event_name": "summary_a"})
-    client.post("/api/events", json={"event_name": "summary_a"})
-    client.post("/api/events", json={"event_name": "summary_b"})
-    resp = client.get("/api/events/summary")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert "summary" in data
-    assert data["total_events"] == 3
-    assert data["summary"]["summary_a"] == 2
-    assert data["summary"]["summary_b"] == 1
-
-
-def test_events_store_max_capacity(client, monkeypatch):
-    monkeypatch.setattr("app.MAX_EVENTS", 3)
-    for i in range(5):
-        client.post("/api/events", json={"event_name": f"cap_{i}"})
-    resp = client.get("/api/events")
-    data = resp.get_json()
-    assert data["total"] == 3
-    names = [e["event_name"] for e in data["events"]]
-    assert "cap_0" not in names
-    assert "cap_1" not in names
-    assert "cap_4" in names
-
-
-def test_track_event_blank_name(client):
-    resp = client.post("/api/events", json={"event_name": "   "})
-    assert resp.status_code == 400
-    assert "blank" in resp.get_json()["error"].lower()
-
-
-def test_track_event_non_string_name(client):
-    resp = client.post("/api/events", json={"event_name": 123})
-    assert resp.status_code == 400
-    assert "string" in resp.get_json()["error"].lower()
-
-
-def test_track_event_long_name(client, monkeypatch):
-    monkeypatch.setattr("app.MAX_EVENT_NAME_LENGTH", 10)
-    resp = client.post("/api/events", json={"event_name": "x" * 100})
-    assert resp.status_code == 400
-    data = resp.get_json()
-    assert "too long" in data["error"].lower()
-    assert data["max_length"] == 10
-
-
-def test_track_event_strips_whitespace(client):
-    resp = client.post("/api/events", json={"event_name": "  page_view  "})
-    assert resp.status_code == 201
-    assert resp.get_json()["event"]["event_name"] == "page_view"
-
-
-def test_track_event_invalid_properties(client):
-    resp = client.post("/api/events", json={"event_name": "ev", "properties": ["not", "a", "dict"]})
-    assert resp.status_code == 400
-    assert "object" in resp.get_json()["error"].lower()
-
-
-def test_track_event_null_properties_accepted(client):
-    resp = client.post("/api/events", json={"event_name": "ev", "properties": None})
-    assert resp.status_code == 201
-    assert resp.get_json()["event"]["properties"] == {}
-
-
-def test_track_event_payload_too_large(client, monkeypatch):
-    monkeypatch.setattr("app.MAX_PAYLOAD_SIZE", 50)
-    big_payload = {"event_name": "ev", "properties": {"data": "x" * 100}}
-    resp = client.post("/api/events", json=big_payload)
-    assert resp.status_code == 413
-    assert "too large" in resp.get_json()["error"].lower()
-
-
-def test_list_events_limit_clamped_to_max(client, monkeypatch):
-    monkeypatch.setattr("app.MAX_PAGE_LIMIT", 3)
-    for i in range(10):
-        client.post("/api/events", json={"event_name": f"ev_{i}"})
-    resp = client.get("/api/events?limit=100")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["limit"] == 3
-    assert data["count"] == 3
-    assert data["total"] == 10
-
-
-def test_events_store_within_capacity(client, monkeypatch):
-    monkeypatch.setattr("app.MAX_EVENTS", 10)
-    for i in range(3):
-        client.post("/api/events", json={"event_name": f"ok_{i}"})
-    resp = client.get("/api/events")
-    data = resp.get_json()
-    assert data["total"] == 3
-
-
-def test_list_events_filter_since(client):
-    # Inject events with controlled timestamps
-    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    resp = client.get("/api/events?since=2024-01-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 2
-    names = sorted(e["event_name"] for e in data["events"])
-    assert names == ["mid", "new"]
-
-
-def test_list_events_filter_until(client):
-    events_store.append({"event_name": "old", "properties": {}, "timestamp": "2020-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "mid", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "new", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    resp = client.get("/api/events?until=2024-06-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 2
-    names = sorted(e["event_name"] for e in data["events"])
-    assert names == ["mid", "old"]
-
-
-def test_list_events_filter_since_and_until(client):
-    events_store.append({"event_name": "a", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "b", "properties": {}, "timestamp": "2025-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "c", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    resp = client.get("/api/events?since=2024-06-01T00:00:00Z&until=2025-06-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 1
-    assert data["events"][0]["event_name"] == "b"
-
-
-def test_list_events_rejects_invalid_since(client):
-    resp = client.get("/api/events?since=not-a-date")
-    assert resp.status_code == 400
-    assert "since" in resp.get_json()["error"]
-
-
-def test_list_events_rejects_invalid_until(client):
-    resp = client.get("/api/events?until=foo")
-    assert resp.status_code == 400
-    assert "until" in resp.get_json()["error"]
-
-
-def test_list_events_rejects_since_greater_than_until(client):
-    resp = client.get("/api/events?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z")
-    assert resp.status_code == 400
-    assert "since" in resp.get_json()["error"]
-
-
-def test_list_events_combines_event_name_and_time_range(client):
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "scroll", "properties": {}, "timestamp": "2026-01-01T00:00:00+00:00"})
-    resp = client.get("/api/events?event_name=click&since=2025-01-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 1
-    assert data["events"][0]["event_name"] == "click"
-
-
-def test_list_events_sort_default(client):
-    events_store.append({"event_name": "b", "properties": {}, "timestamp": "2024-02-01T00:00:00+00:00"})
-    events_store.append({"event_name": "a", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "c", "properties": {}, "timestamp": "2024-03-01T00:00:00+00:00"})
-    resp = client.get("/api/events")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert [e["event_name"] for e in data["events"]] == ["a", "b", "c"]
-    assert data["sort"] == "timestamp"
-    assert data["order"] == "asc"
-
-
-def test_list_events_sort_desc(client):
-    events_store.append({"event_name": "a", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "b", "properties": {}, "timestamp": "2024-02-01T00:00:00+00:00"})
-    events_store.append({"event_name": "c", "properties": {}, "timestamp": "2024-03-01T00:00:00+00:00"})
-    resp = client.get("/api/events?order=desc")
-    data = resp.get_json()
-    assert [e["event_name"] for e in data["events"]] == ["c", "b", "a"]
-
-
-def test_list_events_sort_by_event_name(client):
-    events_store.append({"event_name": "zeta", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "alpha", "properties": {}, "timestamp": "2024-02-01T00:00:00+00:00"})
-    resp = client.get("/api/events?sort=event_name")
-    names = [e["event_name"] for e in resp.get_json()["events"]]
-    assert names == ["alpha", "zeta"]
-
-
-def test_list_events_invalid_sort_field(client):
-    resp = client.get("/api/events?sort=bogus")
-    assert resp.status_code == 400
-    assert "allowed" in resp.get_json()
-
-
-def test_list_events_invalid_sort_order(client):
-    resp = client.get("/api/events?order=sideways")
-    assert resp.status_code == 400
-    assert "allowed" in resp.get_json()
-
-
-def test_summary_filter_by_event_name(client):
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "click", "properties": {}, "timestamp": "2024-01-02T00:00:00+00:00"})
-    events_store.append({"event_name": "scroll", "properties": {}, "timestamp": "2024-01-03T00:00:00+00:00"})
-    resp = client.get("/api/events/summary?event_name=click")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["summary"] == {"click": 2}
-    assert data["total_events"] == 2
-
-
-def test_summary_filter_by_time_range(client):
-    events_store.append({"event_name": "x", "properties": {}, "timestamp": "2024-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "x", "properties": {}, "timestamp": "2024-06-01T00:00:00+00:00"})
-    events_store.append({"event_name": "x", "properties": {}, "timestamp": "2024-12-01T00:00:00+00:00"})
-    resp = client.get("/api/events/summary?since=2024-04-01T00:00:00Z&until=2024-09-01T00:00:00Z")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total_events"] == 1
-
-
-def test_summary_invalid_since(client):
-    resp = client.get("/api/events/summary?since=notanumber")
-    assert resp.status_code == 400
-
-
-def test_summary_until_before_since(client):
-    resp = client.get("/api/events/summary?since=2024-06-01T00:00:00Z&until=2024-01-01T00:00:00Z")
-    assert resp.status_code == 400
-
-
-def test_list_events_q_substring_case_insensitive(client):
-    client.post("/api/events", json={"event_name": "PageView"})
-    client.post("/api/events", json={"event_name": "page_click"})
-    client.post("/api/events", json={"event_name": "scroll"})
-    resp = client.get("/api/events?q=page")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 2
-    assert {e["event_name"] for e in data["events"]} == {"PageView", "page_click"}
-
-
-def test_list_events_q_no_match(client):
-    client.post("/api/events", json={"event_name": "page_view"})
-    resp = client.get("/api/events?q=nonexistent")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total"] == 0
-    assert data["count"] == 0
-
-
-def test_list_events_q_with_event_name_filter_is_and(client):
-    client.post("/api/events", json={"event_name": "page_view"})
-    client.post("/api/events", json={"event_name": "page_click"})
-    # event_name=page_view (完全一致) かつ q=click（部分一致） → 0 件
-    resp = client.get("/api/events?event_name=page_view&q=click")
-    assert resp.status_code == 200
-    assert resp.get_json()["total"] == 0
-    # event_name=page_view かつ q=page → 1 件（page_view のみ）
-    resp = client.get("/api/events?event_name=page_view&q=page")
-    assert resp.status_code == 200
-    assert resp.get_json()["total"] == 1
-
-
-def test_list_events_q_blank_returns_400(client):
-    resp = client.get("/api/events?q=%20%20")  # スペースのみ
-    assert resp.status_code == 400
-    assert "blank" in resp.get_json()["error"]
-
-
-def test_list_events_q_too_long_returns_400(client):
-    long_q = "x" * 201  # MAX_EVENT_NAME_LENGTH=200
-    resp = client.get(f"/api/events?q={long_q}")
-    assert resp.status_code == 400
-    assert "too long" in resp.get_json()["error"]
-
-
-def test_summary_q_substring_case_insensitive(client):
-    client.post("/api/events", json={"event_name": "PageView"})
-    client.post("/api/events", json={"event_name": "PageClick"})
-    client.post("/api/events", json={"event_name": "scroll"})
-    resp = client.get("/api/events/summary?q=page")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["total_events"] == 2
-    assert data["summary"]["PageView"] == 1
-    assert data["summary"]["PageClick"] == 1
-
-
-def test_summary_q_blank_returns_400(client):
-    resp = client.get("/api/events/summary?q=")
-    # 空文字は Flask が None として扱う可能性があるため、ここでは strip 後空 (%20) でテスト
-    # ただし "" は raw=="" なので _normalize_q では blank として 400
-    assert resp.status_code == 400
-
-
-def test_events_lock_concurrent_writes():
-    from app import events_store as store, events_lock
-    import threading as _threading
-
-    store.clear()
-
-    def writer(tag):
-        for i in range(40):
-            with events_lock:
-                store.append({
-                    "event_name": f"{tag}-{i}",
-                    "properties": {},
-                    "timestamp": "2024-01-01T00:00:00+00:00",
-                })
-
-    threads = [_threading.Thread(target=writer, args=(f"t{i}",)) for i in range(4)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert len(store) == 4 * 40
-
-
-# ---------------------------------------------------------------------------
-# GET /api/events/names — distinct event_name 一覧のみを返す軽量エンドポイント
-# ---------------------------------------------------------------------------
-
-
-def test_event_names_empty_store(client):
-    resp = client.get("/api/events/names")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["names"] == []
-    assert data["total"] == 0
-    assert data["count"] == 0
-    assert data["order"] == "asc"
-
-
-def test_event_names_distinct_and_sorted_asc(client):
-    # 同じ event_name を複数回投入しても 1 件にまとめられる、かつ昇順で返る
-    for name in ("zeta", "alpha", "beta", "alpha", "beta"):
-        client.post("/api/events", json={"event_name": name})
-    resp = client.get("/api/events/names")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["names"] == ["alpha", "beta", "zeta"]
-    assert data["total"] == 3
-    assert data["count"] == 3
-
-
-def test_event_names_order_desc(client):
-    for name in ("alpha", "beta", "zeta"):
-        client.post("/api/events", json={"event_name": name})
-    resp = client.get("/api/events/names?order=desc")
-    assert resp.status_code == 200
-    assert resp.get_json()["names"] == ["zeta", "beta", "alpha"]
-
-
-def test_event_names_invalid_order_returns_400(client):
-    resp = client.get("/api/events/names?order=upside_down")
-    assert resp.status_code == 400
-    assert "allowed" in resp.get_json()
-
-
-def test_event_names_pagination(client):
-    for name in ("a", "b", "c", "d", "e"):
-        client.post("/api/events", json={"event_name": name})
-    resp = client.get("/api/events/names?limit=2&offset=1")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["names"] == ["b", "c"]
-    assert data["count"] == 2
-    assert data["total"] == 5
-    assert data["limit"] == 2
-    assert data["offset"] == 1
-
-
-def test_event_names_limit_clamped_to_max(client, monkeypatch):
-    # MAX_PAGE_LIMIT を 3 に下げて、limit=999 が 3 にクランプされることを回帰する
-    monkeypatch.setattr("app.MAX_PAGE_LIMIT", 3)
-    for name in ("a", "b", "c", "d", "e"):
-        client.post("/api/events", json={"event_name": name})
-    resp = client.get("/api/events/names?limit=999")
-    assert resp.status_code == 200
-    assert resp.get_json()["limit"] == 3
-
-
-def test_event_names_negative_limit_falls_back_to_default(client):
-    client.post("/api/events", json={"event_name": "x"})
-    resp = client.get("/api/events/names?limit=-5")
-    assert resp.status_code == 200
-    # 既定 limit にフォールバックする（既存 list_events と挙動を揃える）
-    assert resp.get_json()["limit"] > 0
-
-
-def test_event_names_negative_offset_clamps_to_zero(client):
-    client.post("/api/events", json={"event_name": "x"})
-    resp = client.get("/api/events/names?offset=-1")
-    assert resp.status_code == 200
-    assert resp.get_json()["offset"] == 0
-
-
-def test_event_names_q_filter_case_insensitive(client):
-    for name in ("page_view", "Page_Click", "signup", "API_Call"):
-        client.post("/api/events", json={"event_name": name})
-    resp = client.get("/api/events/names?q=page")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    # "page" を大文字小文字無視で含む 2 件
-    assert set(data["names"]) == {"page_view", "Page_Click"}
-    assert data["total"] == 2
-
-
-def test_event_names_q_blank_returns_400(client):
-    resp = client.get("/api/events/names?q=%20%20%20")
-    assert resp.status_code == 400
-
-
-def test_event_names_since_until_filter(client):
-    # 直近のイベントだけが残るように、過去にあった event を直接 events_store に注入する
-    from app import events_store, events_lock
+import os
+import logging
+import threading
+from datetime import datetime, timezone
+from flask import Flask, jsonify, request
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("analytics")
+
+app = Flask(__name__)
+
+events_store: list[dict] = []
+events_lock = threading.Lock()
+
+DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
+MAX_EVENTS = int(os.getenv("MAX_EVENTS", "10000"))
+MAX_PAGE_LIMIT = int(os.getenv("MAX_PAGE_LIMIT", "500"))
+MAX_PAYLOAD_SIZE = int(os.getenv("MAX_PAYLOAD_SIZE", str(1024 * 1024)))
+MAX_EVENT_NAME_LENGTH = int(os.getenv("MAX_EVENT_NAME_LENGTH", "200"))
+ALLOWED_SORT_FIELDS = {"timestamp", "event_name"}
+ALLOWED_SORT_ORDERS = {"asc", "desc"}
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "service": "analytics-py", "timestamp": datetime.now(timezone.utc).isoformat()})
+
+
+@app.route("/api/events", methods=["POST"])
+def track_event():
+    content_length = request.content_length or 0
+    if content_length > MAX_PAYLOAD_SIZE:
+        logger.warning("Payload too large: %d bytes (max %d)", content_length, MAX_PAYLOAD_SIZE)
+        return jsonify({"error": "Payload too large", "max_bytes": MAX_PAYLOAD_SIZE}), 413
+
+    data = request.get_json(silent=True)
+    if not data or "event_name" not in data:
+        logger.warning("Invalid event payload received")
+        return jsonify({"error": "event_name is required"}), 400
+
+    event_name = data["event_name"]
+    if not isinstance(event_name, str):
+        logger.warning("event_name has invalid type: %s", type(event_name).__name__)
+        return jsonify({"error": "event_name must be a string"}), 400
+
+    normalized_name = event_name.strip()
+    if not normalized_name:
+        logger.warning("event_name is blank")
+        return jsonify({"error": "event_name must not be blank"}), 400
+
+    if len(normalized_name) > MAX_EVENT_NAME_LENGTH:
+        logger.warning("event_name too long: %d chars (max %d)", len(normalized_name), MAX_EVENT_NAME_LENGTH)
+        return jsonify({
+            "error": "event_name is too long",
+            "max_length": MAX_EVENT_NAME_LENGTH,
+        }), 400
+
+    properties = data.get("properties", {})
+    if properties is None:
+        properties = {}
+    if not isinstance(properties, dict):
+        logger.warning("properties has invalid type: %s", type(properties).__name__)
+        return jsonify({"error": "properties must be an object"}), 400
+
+    event = {
+        "event_name": normalized_name,
+        "properties": properties,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
     with events_lock:
-        events_store.clear()
-        events_store.append({
-            "event_name": "old",
-            "properties": {},
-            "timestamp": "2020-01-01T00:00:00+00:00",
-        })
-        events_store.append({
-            "event_name": "new",
-            "properties": {},
-            "timestamp": "2030-01-01T00:00:00+00:00",
-        })
-    resp = client.get("/api/events/names?since=2025-01-01T00:00:00Z")
-    assert resp.status_code == 200
-    assert resp.get_json()["names"] == ["new"]
+        events_store.append(event)
+        if len(events_store) > MAX_EVENTS:
+            removed = len(events_store) - MAX_EVENTS
+            del events_store[:removed]
+            logger.info("Evicted %d old events (store capped at %d)", removed, MAX_EVENTS)
+
+    logger.info("Tracked event: %s", event["event_name"])
+    return jsonify({"message": "Event tracked", "event": event}), 201
 
 
-def test_event_names_invalid_since_returns_400(client):
-    resp = client.get("/api/events/names?since=not-a-date")
-    assert resp.status_code == 400
+def _normalize_q(raw: str | None) -> tuple[str | None, str | None]:
+    """`q` クエリパラメータを正規化する。
+
+    戻り値は (正規化後の値, エラーメッセージ)。
+    - None → (None, None) ：未指定（フィルタしない）
+    - trim 後が空 → (None, "q must not be blank") ：400 を返す対象
+    - 上限超過 → (None, ".. too long") ：400 を返す対象
+    - 正常 → (trimmed, None)
+    """
+    if raw is None:
+        return None, None
+    stripped = raw.strip()
+    if not stripped:
+        return None, "'q' must not be blank"
+    if len(stripped) > MAX_EVENT_NAME_LENGTH:
+        return None, f"'q' is too long (max {MAX_EVENT_NAME_LENGTH})"
+    return stripped, None
 
 
-def test_event_names_since_greater_than_until_returns_400(client):
-    resp = client.get(
-        "/api/events/names?since=2030-01-01T00:00:00Z&until=2020-01-01T00:00:00Z"
+def _filter_events_by_q(events: list[dict], q: str | None) -> list[dict]:
+    """`event_name` に対する大文字小文字無視の部分一致検索。"""
+    if not q:
+        return events
+    needle = q.lower()
+    return [e for e in events if needle in str(e.get("event_name", "")).lower()]
+
+
+def _parse_iso_datetime(value: str, name: str) -> datetime:
+    raw = value.strip()
+    if not raw:
+        raise ValueError(f"'{name}' must not be blank")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"'{name}' must be an ISO8601 datetime: {exc}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _filter_events_by_time(events: list[dict], since: datetime | None, until: datetime | None) -> list[dict]:
+    if since is None and until is None:
+        return events
+    kept = []
+    for e in events:
+        try:
+            ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError, KeyError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if since is not None and ts < since:
+            continue
+        if until is not None and ts > until:
+            continue
+        kept.append(e)
+    return kept
+
+
+@app.route("/api/events", methods=["GET"])
+def list_events():
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    sort_field = request.args.get("sort", "timestamp")
+    sort_order = request.args.get("order", "asc")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    if sort_field not in ALLOWED_SORT_FIELDS:
+        logger.warning("Invalid sort field: %s", sort_field)
+        return jsonify({
+            "error": "Invalid sort field",
+            "allowed": sorted(ALLOWED_SORT_FIELDS),
+        }), 400
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
+
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    reverse = sort_order == "desc"
+    filtered.sort(key=lambda e: e.get(sort_field, ""), reverse=reverse)
+
+    total = len(filtered)
+    paginated = filtered[offset:offset + limit]
+
+    return jsonify({
+        "events": paginated,
+        "count": len(paginated),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort_field,
+        "order": sort_order,
+    })
+
+
+@app.route("/api/events", methods=["DELETE"])
+def delete_events():
+    event_name = request.args.get("event_name")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    # 全件削除事故を防ぐため、最低 1 つのフィルタを必須にする。
+    if not event_name and since_raw is None and until_raw is None:
+        logger.warning("Delete request missing filter parameters")
+        return jsonify({
+            "error": "at least one of 'event_name', 'since', 'until' is required",
+        }), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on delete: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on delete: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    def _ts(event: dict) -> datetime | None:
+        raw = event.get("timestamp")
+        if not isinstance(raw, str):
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _matches(event: dict) -> bool:
+        if event_name and event.get("event_name") != event_name:
+            return False
+        if since is not None or until is not None:
+            ts = _ts(event)
+            if ts is None:
+                return False
+            if since is not None and ts < since:
+                return False
+            if until is not None and ts > until:
+                return False
+        return True
+
+    with events_lock:
+        kept = [e for e in events_store if not _matches(e)]
+        deleted_count = len(events_store) - len(kept)
+        events_store[:] = kept
+
+    logger.info(
+        "Deleted %d events (event_name=%s since=%s until=%s)",
+        deleted_count, event_name, since_raw, until_raw,
     )
-    assert resp.status_code == 400
+    return jsonify({
+        "message": "Events deleted",
+        "deleted_count": deleted_count,
+        "event_name": event_name,
+        "since": since_raw,
+        "until": until_raw,
+    })
 
 
-def test_event_names_does_not_collide_with_summary(client):
-    # `/api/events/names` は names 配列を返し、`/api/events/summary` は集計を返す
-    client.post("/api/events", json={"event_name": "click"})
-    client.post("/api/events", json={"event_name": "click"})
-    client.post("/api/events", json={"event_name": "view"})
+@app.route("/api/events/names", methods=["GET"])
+def list_event_names():
+    """フィルタ後のイベントから distinct な event_name 一覧のみを返す軽量エンドポイント。
 
-    names_resp = client.get("/api/events/names")
-    assert names_resp.status_code == 200
-    assert "names" in names_resp.get_json()
-    assert "summary" not in names_resp.get_json()
+    `/api/events/summary` は名前ごとの件数集計を含むため、UI のドロップダウン
+    populate / オートコンプリート（「名前そのもののリストだけが欲しい」）用途には
+    過剰になりがち。このエンドポイントは集計を行わず、重複排除した event_name 名のみを
+    並べ替えてページングして返す。
 
-    summary_resp = client.get("/api/events/summary")
-    assert summary_resp.status_code == 200
-    assert "summary" in summary_resp.get_json()
-    assert summary_resp.get_json()["summary"] == {"click": 2, "view": 1}
+    クエリ:
+    - `q`: event_name 部分一致（大文字小文字無視。既存 list_events / summary と挙動を揃える）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ（既存と同じパース）
+    - `order`: `asc` / `desc`（既定 `asc`、event_name 昇順）
+    - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用してページング
+    """
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    sort_order = request.args.get("order", "asc")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
 
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on names: %s", q_err)
+        return jsonify({"error": q_err}), 400
 
-# ---------------------------------------------------------------------------
-# GET /api/events/names/<name> — 単一 event_name の集約詳細
-# ---------------------------------------------------------------------------
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order on names: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
 
+    # limit/offset を list_events と同じ規約で正規化する（負値→既定 / 上限クランプ）。
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
 
-def test_event_name_detail_not_found(client):
-    resp = client.get("/api/events/names/missing_event")
-    assert resp.status_code == 404
-    assert "No events found" in resp.get_json()["error"]
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on names: %s", exc)
+        return jsonify({"error": str(exc)}), 400
 
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on names: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
 
-def test_event_name_detail_basic_aggregate(client):
-    client.post("/api/events", json={"event_name": "click", "properties": {"page": "/home"}})
-    client.post("/api/events", json={"event_name": "click", "properties": {"page": "/about", "user": "u1"}})
-    client.post("/api/events", json={"event_name": "scroll"})
+    # ロック内ではスナップショットのみ取り、distinct / sort / filter は外で行う。
+    with events_lock:
+        filtered = list(events_store)
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
 
-    resp = client.get("/api/events/names/click")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["event_name"] == "click"
-    assert data["count"] == 2
-    assert data["first_seen"] is not None
-    assert data["last_seen"] is not None
-    # latest_properties は POST 順で末尾のもの (page=/about, user=u1)
-    assert data["latest_properties"] == {"page": "/about", "user": "u1"}
-    # distinct_property_keys は両イベントの全キーの和集合
-    assert data["distinct_property_keys"] == ["page", "user"]
-
-
-def test_event_name_detail_first_seen_le_last_seen(client):
-    client.post("/api/events", json={"event_name": "click"})
-    client.post("/api/events", json={"event_name": "click"})
-    client.post("/api/events", json={"event_name": "click"})
-
-    resp = client.get("/api/events/names/click")
-    data = resp.get_json()
-    assert data["first_seen"] <= data["last_seen"]
-
-
-def test_event_name_detail_excludes_other_names(client):
-    client.post("/api/events", json={"event_name": "click", "properties": {"a": "1"}})
-    client.post("/api/events", json={"event_name": "scroll", "properties": {"b": "2"}})
-
-    resp = client.get("/api/events/names/click")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["count"] == 1
-    # scroll の properties キーが混ざってはいけない
-    assert data["distinct_property_keys"] == ["a"]
-
-
-def test_event_name_detail_empty_properties(client):
-    # properties が None / 欠落でも安全に扱える
-    client.post("/api/events", json={"event_name": "click"})
-    resp = client.get("/api/events/names/click")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["count"] == 1
-    assert data["distinct_property_keys"] == []
-    assert data["latest_properties"] == {}
-
-
-def test_event_name_detail_since_until_filters_out_all(client):
-    client.post("/api/events", json={"event_name": "click"})
-    # 未来の since を指定して、ヒット 0 件 → 404
-    resp = client.get("/api/events/names/click?since=2999-01-01T00:00:00Z")
-    assert resp.status_code == 404
-
-
-def test_event_name_detail_since_filters_partial(client):
-    # 全件ヒットの since にすればちゃんと残る (実時刻ベースなので過去 since)
-    client.post("/api/events", json={"event_name": "click"})
-    resp = client.get("/api/events/names/click?since=2000-01-01T00:00:00Z")
-    assert resp.status_code == 200
-    assert resp.get_json()["count"] == 1
-
-
-def test_event_name_detail_invalid_since(client):
-    client.post("/api/events", json={"event_name": "click"})
-    resp = client.get("/api/events/names/click?since=not-a-date")
-    assert resp.status_code == 400
-
-
-def test_event_name_detail_since_greater_than_until(client):
-    client.post("/api/events", json={"event_name": "click"})
-    resp = client.get(
-        "/api/events/names/click?since=2030-01-01T00:00:00Z&until=2020-01-01T00:00:00Z",
+    distinct = sorted({e["event_name"] for e in filtered}, reverse=(sort_order == "desc"))
+    total = len(distinct)
+    page = distinct[offset:offset + limit]
+    logger.info(
+        "Listed %d distinct event_name(s) (total=%d limit=%d offset=%d order=%s)",
+        len(page), total, limit, offset, sort_order,
     )
-    assert resp.status_code == 400
-    assert "'since' must be less than or equal to 'until'" in resp.get_json()["error"]
+    return jsonify({
+        "count": len(page),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "order": sort_order,
+        "names": page,
+    })
 
 
-def test_event_name_detail_does_not_collide_with_names_listing(client):
-    # `/api/events/names` (静的) と `/api/events/names/<name>` (動的) が共存することの回帰。
-    # 名前が "names" でも適切に動的ルートにマッチすること。
-    client.post("/api/events", json={"event_name": "names"})
-    listing = client.get("/api/events/names")
-    assert listing.status_code == 200
-    assert "names" in listing.get_json()
-    detail = client.get("/api/events/names/names")
-    assert detail.status_code == 200
-    body = detail.get_json()
-    assert body["event_name"] == "names"
-    assert body["count"] == 1
+@app.route("/api/events/names/<path:name>", methods=["GET"])
+def event_name_detail(name: str):
+    """単一の event_name に対する集約詳細を返す。
 
+    `/api/events/names` は distinct 名一覧のみを返すのに対し、こちらは「名前 1 つ
+    分の詳細」を返す。`/api/events/summary?event_name=...` でも件数は得られるが、
+    `first_seen` / `last_seen` / `latest_properties` / `distinct_property_keys` は
+    summary には含まれないため、イベント名のドリルダウン UI で複数リクエストに
+    分解せず 1 リクエストで描画できるようにする。
 
-def test_event_name_detail_blank_name(client):
-    # path に空文字（trim 後）は通常 Flask 側で 404 になるが、空白のみだった場合の
-    # 防御として 400 が返ることを確認。
-    resp = client.get("/api/events/names/%20%20")
-    assert resp.status_code == 400
+    クエリ:
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ（既存と同じパース）
 
+    戻り値:
+    - `event_name`: 入力された name（フィルタ後 0 件でも 404 になる前にエコーは不要）
+    - `count`: フィルタ後の件数
+    - `first_seen` / `last_seen`: ISO8601 文字列。timestamp 昇順での最小/最大
+    - `latest_properties`: `last_seen` の event の `properties`（無ければ `{}`）
+    - `distinct_property_keys`: フィルタ後の全 event の properties 内に出現したキー（ソート済み）
 
-# ---- /api/events/count ----
+    フィルタ後にレコードが 1 件も無ければ 404 を返す。
+    """
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
 
-def _track(client, name: str, properties=None, t=None):
-    body = {"event_name": name}
-    if properties is not None:
-        body["properties"] = properties
-    resp = client.post("/api/events", json=body)
-    assert resp.status_code == 201
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on name detail: %s", exc)
+        return jsonify({"error": str(exc)}), 400
 
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on name detail: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
 
-def test_count_empty_store(client):
-    resp = client.get("/api/events/count")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body == {"total": 0, "distinct_names": 0, "by_name": {}}
+    # name は事故防止のため `strip()` のみで正規化（大小文字は区別する）。
+    # 既存の event_name 完全一致 (`list_events?event_name=...`) と同じ挙動。
+    normalized_name = name.strip()
+    if not normalized_name:
+        return jsonify({"error": "event_name must not be blank"}), 400
+    if len(normalized_name) > MAX_EVENT_NAME_LENGTH:
+        return jsonify({
+            "error": "event_name is too long",
+            "max_length": MAX_EVENT_NAME_LENGTH,
+        }), 400
 
+    with events_lock:
+        snapshot = list(events_store)
+    matched = [e for e in snapshot if e.get("event_name") == normalized_name]
+    matched = _filter_events_by_time(matched, since, until)
+    if not matched:
+        logger.info("No events for name=%s (since=%s until=%s)", normalized_name, since_raw, until_raw)
+        return jsonify({"error": f"No events found for '{normalized_name}'"}), 404
 
-def test_count_aggregates_by_name(client):
-    for n in ("signup", "click", "click", "click", "purchase"):
-        _track(client, n)
-    resp = client.get("/api/events/count")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["total"] == 5
-    assert body["distinct_names"] == 3
-    assert body["by_name"] == {"signup": 1, "click": 3, "purchase": 1}
+    # first_seen / last_seen は timestamp の昇順最小/最大で求める。
+    # `_filter_events_by_time` が壊れた timestamp を弾いているので、ここでは
+    # 文字列 ISO8601 ソートで安全に最小/最大を取れる（タイムゾーン揃いの保証は無いが、
+    # POST 時に UTC 固定で書き込んでいるため実運用では問題ない）。
+    timestamps = [e.get("timestamp", "") for e in matched if isinstance(e.get("timestamp"), str)]
+    timestamps.sort()
+    first_seen = timestamps[0] if timestamps else None
+    last_seen = timestamps[-1] if timestamps else None
 
+    # latest_properties は last_seen を持つレコードの properties（複数あれば最後に見たもの）。
+    latest_properties: dict = {}
+    if last_seen is not None:
+        for e in matched:
+            if e.get("timestamp") == last_seen:
+                props = e.get("properties")
+                if isinstance(props, dict):
+                    latest_properties = props
+                # 同一 timestamp の重複があれば後勝ち（FIFO 順で書き込まれているため、
+                # ループの最後に見るのが「実時間で最後の観測」になる）
 
-def test_count_filters_by_event_name(client):
-    for n in ("signup", "click", "click"):
-        _track(client, n)
-    resp = client.get("/api/events/count?event_name=click")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["total"] == 2
-    assert body["distinct_names"] == 1
-    assert body["by_name"] == {"click": 2}
+    # 全レコードの properties キーをユニオンしてソートして返す。
+    keys: set[str] = set()
+    for e in matched:
+        props = e.get("properties")
+        if isinstance(props, dict):
+            keys.update(k for k in props.keys() if isinstance(k, str))
 
-
-def test_count_filters_by_q_case_insensitive(client):
-    for n in ("ButtonClick", "buttonHover", "PageView"):
-        _track(client, n)
-    resp = client.get("/api/events/count?q=button")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["total"] == 2
-    assert body["distinct_names"] == 2
-    assert "ButtonClick" in body["by_name"]
-    assert "buttonHover" in body["by_name"]
-
-
-def test_count_rejects_blank_q(client):
-    resp = client.get("/api/events/count?q=%20")
-    assert resp.status_code == 400
-
-
-def test_count_rejects_overlong_q(client):
-    too_long = "a" * 1000
-    resp = client.get(f"/api/events/count?q={too_long}")
-    assert resp.status_code == 400
-
-
-def test_count_rejects_invalid_since(client):
-    resp = client.get("/api/events/count?since=not-a-date")
-    assert resp.status_code == 400
-
-
-def test_count_rejects_since_greater_than_until(client):
-    resp = client.get(
-        "/api/events/count?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z"
+    logger.info(
+        "Returned detail for event_name=%s (count=%d, distinct_keys=%d)",
+        normalized_name, len(matched), len(keys),
     )
-    assert resp.status_code == 400
+    return jsonify({
+        "event_name": normalized_name,
+        "count": len(matched),
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "latest_properties": latest_properties,
+        "distinct_property_keys": sorted(keys),
+    })
 
 
-def test_count_returns_no_by_name_entry_for_zero(client):
-    # event_name=foo フィルタで一致 0 件の場合、by_name は {} のまま埋めない。
-    _track(client, "bar")
-    resp = client.get("/api/events/count?event_name=foo")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body == {"total": 0, "distinct_names": 0, "by_name": {}}
+@app.route("/api/events/count", methods=["GET"])
+def count_events():
+    """保持中イベントの件数のみを返す軽量エンドポイント。
 
+    `/api/events/summary` は per-name 集計込みの応答を返すが、UI 側で
+    バッジ表示・ページャ初期化など「件数だけ知りたい」ケースには過剰。
+    本エンドポイントはレコード本体を返さず、`total` / `distinct_names` /
+    `by_name` の 3 つだけを返す。`by_name` は登場した event_name のみで、
+    count 0 のキーは埋めない（軽量化）。
 
-def test_count_combined_event_name_and_q(client):
-    # event_name (完全一致) と q (部分一致) を併用すると AND 条件になる。
-    _track(client, "ButtonClick")
-    _track(client, "ButtonHover")
-    resp = client.get("/api/events/count?event_name=ButtonClick&q=click")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["total"] == 1
-    assert body["by_name"] == {"ButtonClick": 1}
+    クエリ:
+    - `event_name`: 完全一致フィルタ（既存 `/summary` と同じ）
+    - `q`: event_name の部分一致（大文字小文字無視、既存 `/summary` と同じ）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
 
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on count: %s", q_err)
+        return jsonify({"error": q_err}), 400
 
-# ---- /api/events/property_keys ----
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on count: %s", exc)
+        return jsonify({"error": str(exc)}), 400
 
-def test_property_keys_empty_store(client):
-    resp = client.get("/api/events/property_keys")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["total_events"] == 0
-    assert body["distinct_property_keys"] == 0
-    assert body["total"] == 0
-    assert body["count"] == 0
-    assert body["property_keys"] == []
-    assert body["order"] == "asc"
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on count: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
 
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
 
-def test_property_keys_distinct_aggregate(client):
-    client.post("/api/events", json={"event_name": "page_view", "properties": {"page": "/a", "user_id": 1}})
-    client.post("/api/events", json={"event_name": "page_view", "properties": {"page": "/b"}})
-    client.post("/api/events", json={"event_name": "click", "properties": {"element": "btn"}})
-    resp = client.get("/api/events/property_keys")
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["total_events"] == 3
-    assert body["distinct_property_keys"] == 3
-    keys = {item["key"]: item["count"] for item in body["property_keys"]}
-    assert keys == {"page": 2, "user_id": 1, "element": 1}
+    by_name: dict[str, int] = {}
+    for event in filtered:
+        name = event["event_name"]
+        by_name[name] = by_name.get(name, 0) + 1
 
-
-def test_property_keys_dedup_within_single_event(client):
-    # 1 イベント内で同じキーが複数回登場しても 1 と数える（dict のキーはユニーク）。
-    client.post("/api/events", json={"event_name": "x", "properties": {"k": "v1"}})
-    client.post("/api/events", json={"event_name": "x", "properties": {"k": "v2"}})
-    resp = client.get("/api/events/property_keys")
-    body = resp.get_json()
-    keys = {item["key"]: item["count"] for item in body["property_keys"]}
-    assert keys == {"k": 2}
-
-
-def test_property_keys_ignores_non_dict_properties(client):
-    # properties が無い / dict でないイベントはスキップする（POST 時には弾かれるが
-    # 防御的にここでも保護していることを確認する）。
-    events_store.append({"event_name": "skipme", "properties": "not-a-dict", "timestamp": "2026-06-15T00:00:00+00:00"})
-    events_store.append({"event_name": "ok", "properties": {"valid": True}, "timestamp": "2026-06-15T00:00:00+00:00"})
-    resp = client.get("/api/events/property_keys")
-    body = resp.get_json()
-    assert body["distinct_property_keys"] == 1
-    assert body["property_keys"][0]["key"] == "valid"
-
-
-def test_property_keys_filters_by_event_name(client):
-    client.post("/api/events", json={"event_name": "wanted", "properties": {"a": 1}})
-    client.post("/api/events", json={"event_name": "other", "properties": {"b": 2}})
-    resp = client.get("/api/events/property_keys?event_name=wanted")
-    body = resp.get_json()
-    assert body["total_events"] == 1
-    keys = {item["key"] for item in body["property_keys"]}
-    assert keys == {"a"}
-
-
-def test_property_keys_filters_by_q_case_insensitive(client):
-    client.post("/api/events", json={"event_name": "ButtonClick", "properties": {"x": 1}})
-    client.post("/api/events", json={"event_name": "ScrollEvent", "properties": {"y": 1}})
-    resp = client.get("/api/events/property_keys?q=button")
-    body = resp.get_json()
-    assert body["total_events"] == 1
-    assert {item["key"] for item in body["property_keys"]} == {"x"}
-
-
-def test_property_keys_filters_by_since(client):
-    events_store.append({"event_name": "old", "properties": {"old_key": 1}, "timestamp": "2020-01-01T00:00:00+00:00"})
-    events_store.append({"event_name": "new", "properties": {"new_key": 1}, "timestamp": "2026-06-15T00:00:00+00:00"})
-    resp = client.get("/api/events/property_keys?since=2026-01-01T00:00:00Z")
-    body = resp.get_json()
-    assert body["total_events"] == 1
-    assert {item["key"] for item in body["property_keys"]} == {"new_key"}
-
-
-def test_property_keys_sort_order_desc(client):
-    client.post("/api/events", json={"event_name": "x", "properties": {"a": 1, "z": 1, "m": 1}})
-    resp = client.get("/api/events/property_keys?order=desc")
-    body = resp.get_json()
-    keys = [item["key"] for item in body["property_keys"]]
-    assert keys == ["z", "m", "a"]
-
-
-def test_property_keys_pagination(client):
-    client.post("/api/events", json={"event_name": "x", "properties": {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1}})
-    resp = client.get("/api/events/property_keys?limit=2&offset=1")
-    body = resp.get_json()
-    assert body["total"] == 5
-    assert body["count"] == 2
-    assert body["limit"] == 2
-    assert body["offset"] == 1
-    keys = [item["key"] for item in body["property_keys"]]
-    assert keys == ["b", "c"]
-
-
-def test_property_keys_rejects_blank_q(client):
-    resp = client.get("/api/events/property_keys?q=%20")
-    assert resp.status_code == 400
-
-
-def test_property_keys_rejects_overlong_q(client):
-    resp = client.get("/api/events/property_keys?q=" + ("a" * 1000))
-    assert resp.status_code == 400
-
-
-def test_property_keys_rejects_invalid_order(client):
-    resp = client.get("/api/events/property_keys?order=sideways")
-    assert resp.status_code == 400
-
-
-def test_property_keys_rejects_invalid_since(client):
-    resp = client.get("/api/events/property_keys?since=not-a-date")
-    assert resp.status_code == 400
-
-
-def test_property_keys_rejects_since_greater_than_until(client):
-    resp = client.get(
-        "/api/events/property_keys?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z"
+    total = len(filtered)
+    logger.info(
+        "Count requested: total=%d distinct_names=%d (event_name=%s q=%s)",
+        total, len(by_name), event_name, q,
     )
-    assert resp.status_code == 400
+    return jsonify({
+        "total": total,
+        "distinct_names": len(by_name),
+        "by_name": by_name,
+    })
 
 
-def test_property_keys_event_with_no_matching_properties(client):
-    # event_name 完全一致が無い場合、distinct_property_keys は 0。
-    client.post("/api/events", json={"event_name": "real", "properties": {"k": 1}})
-    resp = client.get("/api/events/property_keys?event_name=missing")
-    body = resp.get_json()
-    assert body["total_events"] == 0
-    assert body["distinct_property_keys"] == 0
-    assert body["property_keys"] == []
+@app.route("/api/events/property_keys", methods=["GET"])
+def list_property_keys():
+    """フィルタ後のイベントに登場した properties のキーと「そのキーを持つイベント件数」を返す。
+
+    `/api/events/names/<name>` の `distinct_property_keys` は特定の event_name に限定された
+    キー一覧しか返せないため、UI で「保持中の全イベントを横断して、どんな properties
+    キーが使われているか」を一覧したいケースで複数リクエストの集約が必要になる。
+    このエンドポイントは event_name に依存せず、フィルタ後の全イベントを横断して
+    properties キーとその出現件数を返す。1 イベント内で同じキーは 1 度だけ数えるため、
+    `count` は「そのキーを少なくとも 1 つ持つイベント数」になる。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ（既存 `/summary` `/count` と同じ）
+    - `q`: event_name の部分一致（大文字小文字無視、既存と同じ）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    - `order`: `asc` / `desc`（既定 `asc`、キー名の昇順）
+    - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用してページング
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    sort_order = request.args.get("order", "asc")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on property_keys: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order on property_keys: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
+
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on property_keys: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on property_keys: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    key_counts: dict[str, int] = {}
+    for event in filtered:
+        props = event.get("properties")
+        if not isinstance(props, dict):
+            continue
+        for key in {k for k in props.keys() if isinstance(k, str)}:
+            key_counts[key] = key_counts.get(key, 0) + 1
+
+    items = [{"key": k, "count": c} for k, c in key_counts.items()]
+    reverse = sort_order == "desc"
+    items.sort(key=lambda x: x["key"], reverse=reverse)
+
+    total = len(items)
+    page = items[offset:offset + limit]
+    logger.info(
+        "Property keys requested: total_events=%d distinct_keys=%d (event_name=%s q=%s)",
+        len(filtered), total, event_name, q,
+    )
+    return jsonify({
+        "total_events": len(filtered),
+        "distinct_property_keys": total,
+        "count": len(page),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "order": sort_order,
+        "property_keys": page,
+    })
+
+
+_ALLOWED_PROPERTY_VALUE_SORT_FIELDS = {"value", "count"}
+
+
+def _is_jsonable_scalar(v: object) -> bool:
+    """`property_values` で集計対象とするスカラ値かを判定する。
+
+    JSON のスカラとしてそのまま返せる型に限定する。`dict` や `list` は
+    キーとして hashable でないため Counter 集計に乗らないことに加え、
+    ドロップダウン用途では値ごとの絞り込みができないので除外する。
+    `bool` は `int` のサブクラスだが、明示的に列挙して将来の型増加に追従しやすくする。
+    """
+    return v is None or isinstance(v, (str, int, float, bool))
+
+
+@app.route("/api/events/property_values/<path:key>", methods=["GET"])
+def list_property_values(key: str):
+    """指定 `key` の distinct な property 値とその出現回数を返す。
+
+    `/api/events/property_keys` がキー名のリストを返すのに対し、本エンドポイントは
+    特定キーの値の distribution を返す。UI のフィルタドロップダウン populate や
+    「最も多い値トップ N」表示など、`/api/events` 全件取得を避けたい用途を想定。
+
+    パスパラメータ:
+        key: properties オブジェクトのキー名（trim 後の長さは MAX_EVENT_NAME_LENGTH 以内）。
+
+    クエリパラメータ:
+        - `event_name`: 完全一致フィルタ（property_keys と整合）
+        - `q`: event_name の部分一致（大文字小文字無視）
+        - `since` / `until`: ISO8601 範囲フィルタ
+        - `sort`: `count` (既定) または `value`。
+        - `order`: `asc` / `desc`（既定 `desc`、頻度の高い順）。
+        - `limit` / `offset`: DEFAULT_PAGE_LIMIT / MAX_PAGE_LIMIT を流用。
+
+    値の型は str / int / float / bool / None を許容。dict / list 等の非スカラ型は
+    集計対象から除外し、`property_values` に登場させない（hashable でないため
+    Counter 集計が成立しないことと、UI でフィルタ条件として使いにくいため）。
+
+    レスポンス:
+        {
+          key, total_events, events_with_key, distinct_property_values,
+          count, total, limit, offset, sort, order,
+          property_values: [{value, count}, ...]
+        }
+    """
+    normalized_key = key.strip()
+    if not normalized_key:
+        logger.warning("Blank property key on property_values")
+        return jsonify({"error": "'key' must not be blank"}), 400
+    if len(normalized_key) > MAX_EVENT_NAME_LENGTH:
+        logger.warning("Property key too long on property_values: %d", len(normalized_key))
+        return jsonify({
+            "error": "'key' is too long",
+            "max_length": MAX_EVENT_NAME_LENGTH,
+        }), 400
+
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    sort_field = request.args.get("sort", "count")
+    sort_order = request.args.get("order", "desc")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on property_values: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    if sort_field not in _ALLOWED_PROPERTY_VALUE_SORT_FIELDS:
+        logger.warning("Invalid sort field on property_values: %s", sort_field)
+        return jsonify({
+            "error": "Invalid sort field",
+            "allowed": sorted(_ALLOWED_PROPERTY_VALUE_SORT_FIELDS),
+        }), 400
+
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order on property_values: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
+
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on property_values: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on property_values: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    value_counts: dict[object, int] = {}
+    events_with_key = 0
+    skipped_non_scalar = 0
+    for event in filtered:
+        props = event.get("properties")
+        if not isinstance(props, dict) or normalized_key not in props:
+            continue
+        events_with_key += 1
+        raw_value = props[normalized_key]
+        if not _is_jsonable_scalar(raw_value):
+            skipped_non_scalar += 1
+            continue
+        value_counts[raw_value] = value_counts.get(raw_value, 0) + 1
+
+    items = [{"value": v, "count": c} for v, c in value_counts.items()]
+    reverse = sort_order == "desc"
+    if sort_field == "count":
+        # count 同値時は value 表示順を安定化するため secondary key として
+        # 値の文字列表現を使う（reverse の影響は受けない）。
+        items.sort(key=lambda x: str(x["value"]))
+        items.sort(key=lambda x: x["count"], reverse=reverse)
+    else:
+        # 値の比較は型混在に弱いため文字列表現で行う（タイブレーカ用ではなく主キー）。
+        items.sort(key=lambda x: str(x["value"]), reverse=reverse)
+
+    total = len(items)
+    page = items[offset:offset + limit]
+
+    if skipped_non_scalar:
+        logger.info(
+            "Property values: skipped %d non-scalar values for key=%s",
+            skipped_non_scalar, normalized_key,
+        )
+    logger.info(
+        "Property values requested: key=%s total_events=%d events_with_key=%d distinct_values=%d",
+        normalized_key, len(filtered), events_with_key, total,
+    )
+    return jsonify({
+        "key": normalized_key,
+        "total_events": len(filtered),
+        "events_with_key": events_with_key,
+        "distinct_property_values": total,
+        "count": len(page),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort_field,
+        "order": sort_order,
+        "property_values": page,
+    })
+
+
+@app.route("/api/events/summary", methods=["GET"])
+def events_summary():
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on summary: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on summary: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on summary: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    summary: dict[str, int] = {}
+    for event in filtered:
+        name = event["event_name"]
+        summary[name] = summary.get(name, 0) + 1
+    logger.info("Summary requested, %d unique event types", len(summary))
+    return jsonify({"summary": summary, "total_events": len(filtered)})
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("ANALYTICS_PORT", "8001"))
+    logger.info("Starting analytics service on port %d", port)
+    app.run(host="0.0.0.0", port=port)
