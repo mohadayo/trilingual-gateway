@@ -629,6 +629,170 @@ def list_property_keys():
     })
 
 
+_ALLOWED_PROPERTY_VALUE_SORT_FIELDS = {"value", "count"}
+
+
+def _is_jsonable_scalar(v: object) -> bool:
+    """`property_values` で集計対象とするスカラ値かを判定する。
+
+    JSON のスカラとしてそのまま返せる型に限定する。`dict` や `list` は
+    キーとして hashable でないため Counter 集計に乗らないことに加え、
+    ドロップダウン用途では値ごとの絞り込みができないので除外する。
+    `bool` は `int` のサブクラスだが、明示的に列挙して将来の型増加に追従しやすくする。
+    """
+    return v is None or isinstance(v, (str, int, float, bool))
+
+
+@app.route("/api/events/property_values/<path:key>", methods=["GET"])
+def list_property_values(key: str):
+    """指定 `key` の distinct な property 値とその出現回数を返す。
+
+    `/api/events/property_keys` がキー名のリストを返すのに対し、本エンドポイントは
+    特定キーの値の distribution を返す。UI のフィルタドロップダウン populate や
+    「最も多い値トップ N」表示など、`/api/events` 全件取得を避けたい用途を想定。
+
+    パスパラメータ:
+        key: properties オブジェクトのキー名（trim 後の長さは MAX_EVENT_NAME_LENGTH 以内）。
+
+    クエリパラメータ:
+        - `event_name`: 完全一致フィルタ（property_keys と整合）
+        - `q`: event_name の部分一致（大文字小文字無視）
+        - `since` / `until`: ISO8601 範囲フィルタ
+        - `sort`: `count` (既定) または `value`。
+        - `order`: `asc` / `desc`（既定 `desc`、頻度の高い順）。
+        - `limit` / `offset`: DEFAULT_PAGE_LIMIT / MAX_PAGE_LIMIT を流用。
+
+    値の型は str / int / float / bool / None を許容。dict / list 等の非スカラ型は
+    集計対象から除外し、`property_values` に登場させない（hashable でないため
+    Counter 集計が成立しないことと、UI でフィルタ条件として使いにくいため）。
+
+    レスポンス:
+        {
+          key, total_events, events_with_key, distinct_property_values,
+          count, total, limit, offset, sort, order,
+          property_values: [{value, count}, ...]
+        }
+    """
+    normalized_key = key.strip()
+    if not normalized_key:
+        logger.warning("Blank property key on property_values")
+        return jsonify({"error": "'key' must not be blank"}), 400
+    if len(normalized_key) > MAX_EVENT_NAME_LENGTH:
+        logger.warning("Property key too long on property_values: %d", len(normalized_key))
+        return jsonify({
+            "error": "'key' is too long",
+            "max_length": MAX_EVENT_NAME_LENGTH,
+        }), 400
+
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    sort_field = request.args.get("sort", "count")
+    sort_order = request.args.get("order", "desc")
+    limit = request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on property_values: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    if sort_field not in _ALLOWED_PROPERTY_VALUE_SORT_FIELDS:
+        logger.warning("Invalid sort field on property_values: %s", sort_field)
+        return jsonify({
+            "error": "Invalid sort field",
+            "allowed": sorted(_ALLOWED_PROPERTY_VALUE_SORT_FIELDS),
+        }), 400
+
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order on property_values: %s", sort_order)
+        return jsonify({
+            "error": "Invalid sort order",
+            "allowed": sorted(ALLOWED_SORT_ORDERS),
+        }), 400
+
+    if limit < 0:
+        limit = DEFAULT_PAGE_LIMIT
+    if limit > MAX_PAGE_LIMIT:
+        limit = MAX_PAGE_LIMIT
+    if offset < 0:
+        offset = 0
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on property_values: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on property_values: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    value_counts: dict[object, int] = {}
+    events_with_key = 0
+    skipped_non_scalar = 0
+    for event in filtered:
+        props = event.get("properties")
+        if not isinstance(props, dict) or normalized_key not in props:
+            continue
+        events_with_key += 1
+        raw_value = props[normalized_key]
+        if not _is_jsonable_scalar(raw_value):
+            skipped_non_scalar += 1
+            continue
+        value_counts[raw_value] = value_counts.get(raw_value, 0) + 1
+
+    items = [{"value": v, "count": c} for v, c in value_counts.items()]
+    reverse = sort_order == "desc"
+    if sort_field == "count":
+        # count 同値時は value 表示順を安定化するため secondary key として
+        # 値の文字列表現を使う（reverse の影響は受けない）。
+        items.sort(key=lambda x: str(x["value"]))
+        items.sort(key=lambda x: x["count"], reverse=reverse)
+    else:
+        # 値の比較は型混在に弱いため文字列表現で行う（タイブレーカ用ではなく主キー）。
+        items.sort(key=lambda x: str(x["value"]), reverse=reverse)
+
+    total = len(items)
+    page = items[offset:offset + limit]
+
+    if skipped_non_scalar:
+        logger.info(
+            "Property values: skipped %d non-scalar values for key=%s",
+            skipped_non_scalar, normalized_key,
+        )
+    logger.info(
+        "Property values requested: key=%s total_events=%d events_with_key=%d distinct_values=%d",
+        normalized_key, len(filtered), events_with_key, total,
+    )
+    return jsonify({
+        "key": normalized_key,
+        "total_events": len(filtered),
+        "events_with_key": events_with_key,
+        "distinct_property_values": total,
+        "count": len(page),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort_field,
+        "order": sort_order,
+        "property_values": page,
+    })
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")
