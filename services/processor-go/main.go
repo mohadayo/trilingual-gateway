@@ -822,6 +822,72 @@ func nullableTime(t time.Time, count int) interface{} {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
+// messagesByDayHandler は filters 通過後のメッセージを UTC 日付 (YYYY-MM-DD) で
+// ビニングし、日付昇順の時系列カウントを返す。
+//
+// /api/stats が「フィルタ通過の合計と channel 別分布」を返すのに対し、本ハンドラは
+// 「時系列の分布」を返す軽量集計エンドポイント。UI でメッセージ流量の推移グラフを
+// 描画する用途を想定し、`/api/messages` 全件取得＋クライアント側ビニングに比べて
+// ペイロードと JSON エンコード時間を削減する。
+//
+// フィルタは parseMessageFilters に集約（channel / q / since / until）。
+// 並び順は日付の lex 昇順固定（ISO 日付の lex 順は時系列順と一致）。
+func messagesByDayHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	mu.RLock()
+	counts := make(map[string]int)
+	total := 0
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		// CreatedAt は publish 時に time.Now() で UTC 化されている前提だが、
+		// 異なる location が混入しても UTC へ変換してから日付を取り出すことで
+		// 同日と判定されるべきメッセージが日付境界で分裂しないようにする。
+		day := m.CreatedAt.UTC().Format("2006-01-02")
+		counts[day]++
+		total++
+	}
+	mu.RUnlock()
+
+	// 日付昇順で固定。ISO 日付 (`YYYY-MM-DD`) の lex 順は時系列順と一致するため、
+	// 単純な sort.Strings で十分。
+	days := make([]string, 0, len(counts))
+	for d := range counts {
+		days = append(days, d)
+	}
+	sort.Strings(days)
+	byDay := make([]map[string]interface{}, 0, len(days))
+	for _, d := range days {
+		byDay = append(byDay, map[string]interface{}{
+			"day":   d,
+			"count": counts[d],
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":         total,
+		"distinct_days": len(byDay),
+		"by_day":        byDay,
+	})
+}
+
 func main() {
 	port := os.Getenv("PROCESSOR_PORT")
 	if port == "" {
@@ -847,6 +913,8 @@ func main() {
 	// distinct な channel 一覧。`GET /api/messages/{id}` ワイルドカードよりも
 	// リテラルパターンが優先されるため、`channels` を ID として誤解されない。
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
+	// 日別の時系列カウント（リテラル `by_day` も `{id}` より優先される）。
+	mux.HandleFunc("GET /api/messages/by_day", messagesByDayHandler)
 	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
 	// `/api/messages/{id}` (単一) は別経路として共存する。
 	// 単一 path で GET と DELETE は別ハンドラに振り分け、URL 設計をシンメトリックに保つ。
