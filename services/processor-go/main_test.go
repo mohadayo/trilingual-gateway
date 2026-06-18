@@ -2151,3 +2151,224 @@ func TestDeleteMessageByID_PutReturns405ViaRouter(t *testing.T) {
 		t.Fatalf("expected 405, got %d", w.Code)
 	}
 }
+
+func seedByDay(t *testing.T) {
+	t.Helper()
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "id-1", Channel: "alerts", Payload: "p1", CreatedAt: time.Date(2030, 1, 1, 8, 0, 0, 0, time.UTC)},
+		{ID: "id-2", Channel: "alerts", Payload: "p2", CreatedAt: time.Date(2030, 1, 1, 23, 30, 0, 0, time.UTC)},
+		{ID: "id-3", Channel: "orders", Payload: "p3", CreatedAt: time.Date(2030, 1, 2, 0, 5, 0, 0, time.UTC)},
+		{ID: "id-4", Channel: "orders", Payload: "p4", CreatedAt: time.Date(2030, 1, 4, 12, 0, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+}
+
+func TestMessagesByDay_EmptyStoreReturnsEmpty(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if total, _ := resp["total"].(float64); total != 0 {
+		t.Errorf("expected total=0, got %v", resp["total"])
+	}
+	if distinct, _ := resp["distinct_days"].(float64); distinct != 0 {
+		t.Errorf("expected distinct_days=0, got %v", resp["distinct_days"])
+	}
+	byDay, ok := resp["by_day"].([]interface{})
+	if !ok {
+		t.Fatalf("expected by_day array, got %T", resp["by_day"])
+	}
+	if len(byDay) != 0 {
+		t.Errorf("expected empty by_day, got %v", byDay)
+	}
+}
+
+func TestMessagesByDay_BasicChronologicalOrder(t *testing.T) {
+	seedByDay(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 4 {
+		t.Errorf("expected total=4, got %v", resp["total"])
+	}
+	if distinct, _ := resp["distinct_days"].(float64); distinct != 3 {
+		t.Errorf("expected distinct_days=3, got %v", resp["distinct_days"])
+	}
+	byDay, _ := resp["by_day"].([]interface{})
+	if len(byDay) != 3 {
+		t.Fatalf("expected 3 buckets, got %d: %v", len(byDay), byDay)
+	}
+	want := []struct {
+		day   string
+		count float64
+	}{
+		{"2030-01-01", 2},
+		{"2030-01-02", 1},
+		{"2030-01-04", 1},
+	}
+	for i, w := range want {
+		bucket, _ := byDay[i].(map[string]interface{})
+		if bucket["day"] != w.day {
+			t.Errorf("position %d: expected day=%s, got %v", i, w.day, bucket["day"])
+		}
+		if got, _ := bucket["count"].(float64); got != w.count {
+			t.Errorf("position %d: expected count=%v, got %v", i, w.count, got)
+		}
+	}
+}
+
+func TestMessagesByDay_FiltersByChannel(t *testing.T) {
+	seedByDay(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day?channel=orders", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 2 {
+		t.Errorf("expected total=2 (orders only), got %v", resp["total"])
+	}
+	byDay, _ := resp["by_day"].([]interface{})
+	if len(byDay) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(byDay))
+	}
+	d0, _ := byDay[0].(map[string]interface{})
+	d1, _ := byDay[1].(map[string]interface{})
+	if d0["day"] != "2030-01-02" || d1["day"] != "2030-01-04" {
+		t.Errorf("expected orders days [2030-01-02, 2030-01-04], got [%v, %v]", d0["day"], d1["day"])
+	}
+}
+
+func TestMessagesByDay_FiltersBySinceUntil(t *testing.T) {
+	seedByDay(t)
+	// since-until で 2 日目だけを切り出す
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/messages/by_day?since=2030-01-02T00:00:00Z&until=2030-01-02T23:59:59Z",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 1 {
+		t.Errorf("expected total=1, got %v", resp["total"])
+	}
+	byDay, _ := resp["by_day"].([]interface{})
+	if len(byDay) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(byDay))
+	}
+	d0, _ := byDay[0].(map[string]interface{})
+	if d0["day"] != "2030-01-02" {
+		t.Errorf("expected day=2030-01-02, got %v", d0["day"])
+	}
+}
+
+func TestMessagesByDay_FiltersByQ(t *testing.T) {
+	seedByDay(t)
+	// payload "p1" は 2030-01-01 のレコードのみ一致
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day?q=p1", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 1 {
+		t.Errorf("expected total=1, got %v", resp["total"])
+	}
+	byDay, _ := resp["by_day"].([]interface{})
+	if len(byDay) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(byDay))
+	}
+}
+
+func TestMessagesByDay_RejectsInvalidSince(t *testing.T) {
+	seedByDay(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesByDay_RejectsSinceGreaterThanUntil(t *testing.T) {
+	seedByDay(t)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/messages/by_day?since=2030-12-01T00:00:00Z&until=2030-01-01T00:00:00Z",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesByDay_RejectsNonGet(t *testing.T) {
+	seedByDay(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/messages/by_day", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestMessagesByDay_NormalizesToUTCAcrossLocations(t *testing.T) {
+	resetMessages()
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("Asia/Tokyo not available: %v", err)
+	}
+	// 同じ瞬間を別 location で表現したレコード:
+	//   UTC 2030-01-01T15:00:00Z == JST 2030-01-02T00:00:00+09:00
+	// どちらも UTC 日付 "2030-01-01" にビニングされる。
+	mu.Lock()
+	messages = []Message{
+		{ID: "u1", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 1, 15, 0, 0, 0, time.UTC)},
+		{ID: "u2", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 2, 0, 0, 0, 0, jst)},
+	}
+	mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day", nil)
+	w := httptest.NewRecorder()
+	messagesByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	byDay, _ := resp["by_day"].([]interface{})
+	if len(byDay) != 1 {
+		t.Fatalf("expected 1 bucket (both records same UTC day), got %d: %v", len(byDay), byDay)
+	}
+	d0, _ := byDay[0].(map[string]interface{})
+	if d0["day"] != "2030-01-01" {
+		t.Errorf("expected day=2030-01-01, got %v", d0["day"])
+	}
+	if c, _ := d0["count"].(float64); c != 2 {
+		t.Errorf("expected count=2, got %v", c)
+	}
+}
