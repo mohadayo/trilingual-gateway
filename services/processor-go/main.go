@@ -888,6 +888,71 @@ func messagesByDayHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// messagesByHourOfDayHandler は filters 通過後のメッセージを UTC の時刻 (00-23) で
+// ビニングし、時間昇順の分布を返す。日付には依存しない「時間帯別の流量」を見るための
+// 軽量集計エンドポイント。
+//
+// /api/messages/by_day が「いつどれだけ流量があったか」の時系列を見るのに対し、
+// 本ハンドラは「1 日のうち、どの時間帯に流量が集中しているか」を 1 リクエストで
+// 把握するための集計。サポート体制（夜間・早朝シフト）や cron スケジュールの設計、
+// レート制限調整の根拠資料として使う。
+//
+// 集計キーは "00"〜"23" の 2 桁文字列（by_day の "YYYY-MM-DD" と同じく文字列で
+// 持つことで lex 順 = 時系列順を保つ）。母集団 0 の時間帯は省略する（by_day と同じ
+// 「populated only」方針）。フィルタは `parseMessageFilters` を再利用する。
+func messagesByHourOfDayHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	mu.RLock()
+	counts := make(map[string]int)
+	total := 0
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		// UTC に正規化してから "HH" (2 桁ゼロ詰め) で時間帯ビニング。
+		hour := fmt.Sprintf("%02d", m.CreatedAt.UTC().Hour())
+		counts[hour]++
+		total++
+	}
+	mu.RUnlock()
+
+	// 時間昇順で固定。"HH" の lex 順 = 数値昇順なので sort.Strings で十分。
+	hours := make([]string, 0, len(counts))
+	for h := range counts {
+		hours = append(hours, h)
+	}
+	sort.Strings(hours)
+	byHour := make([]map[string]interface{}, 0, len(hours))
+	for _, h := range hours {
+		byHour = append(byHour, map[string]interface{}{
+			"hour":  h,
+			"count": counts[h],
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":          total,
+		"distinct_hours": len(byHour),
+		"by_hour":        byHour,
+	})
+}
+
 func main() {
 	port := os.Getenv("PROCESSOR_PORT")
 	if port == "" {
@@ -915,6 +980,7 @@ func main() {
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
 	// 日別の時系列カウント（リテラル `by_day` も `{id}` より優先される）。
 	mux.HandleFunc("GET /api/messages/by_day", messagesByDayHandler)
+	mux.HandleFunc("GET /api/messages/by_hour_of_day", messagesByHourOfDayHandler)
 	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
 	// `/api/messages/{id}` (単一) は別経路として共存する。
 	// 単一 path で GET と DELETE は別ハンドラに振り分け、URL 設計をシンメトリックに保つ。
