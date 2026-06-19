@@ -2372,3 +2372,261 @@ func TestMessagesByDay_NormalizesToUTCAcrossLocations(t *testing.T) {
 		t.Errorf("expected count=2, got %v", c)
 	}
 }
+
+// ---- /api/messages/by_hour_of_day ----
+
+// 同日内の異なる時刻にメッセージを置き、`by_hour_of_day` が時間帯ビニングと
+// "HH" 文字列キーで昇順に揃えて返すか検証するためのヘルパ。
+func seedByHourOfDay(t *testing.T) {
+	t.Helper()
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		// 09 時台 (UTC) × 2
+		{ID: "h-1", Channel: "alerts", Payload: "p1", CreatedAt: time.Date(2030, 1, 1, 9, 0, 0, 0, time.UTC)},
+		{ID: "h-2", Channel: "alerts", Payload: "p2", CreatedAt: time.Date(2030, 1, 1, 9, 45, 0, 0, time.UTC)},
+		// 14 時台 (UTC) × 1
+		{ID: "h-3", Channel: "orders", Payload: "p3", CreatedAt: time.Date(2030, 1, 2, 14, 5, 0, 0, time.UTC)},
+		// 23 時台 (UTC) × 1
+		{ID: "h-4", Channel: "orders", Payload: "p4", CreatedAt: time.Date(2030, 1, 4, 23, 59, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+}
+
+func TestMessagesByHourOfDay_EmptyStoreReturnsEmpty(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if total, _ := resp["total"].(float64); total != 0 {
+		t.Errorf("expected total=0, got %v", resp["total"])
+	}
+	if distinct, _ := resp["distinct_hours"].(float64); distinct != 0 {
+		t.Errorf("expected distinct_hours=0, got %v", resp["distinct_hours"])
+	}
+	byHour, ok := resp["by_hour"].([]interface{})
+	if !ok {
+		t.Fatalf("expected by_hour array, got %T", resp["by_hour"])
+	}
+	if len(byHour) != 0 {
+		t.Errorf("expected empty by_hour, got %v", byHour)
+	}
+}
+
+func TestMessagesByHourOfDay_BasicChronologicalOrder(t *testing.T) {
+	seedByHourOfDay(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 4 {
+		t.Errorf("expected total=4, got %v", resp["total"])
+	}
+	if distinct, _ := resp["distinct_hours"].(float64); distinct != 3 {
+		t.Errorf("expected distinct_hours=3, got %v", resp["distinct_hours"])
+	}
+	byHour, _ := resp["by_hour"].([]interface{})
+	if len(byHour) != 3 {
+		t.Fatalf("expected 3 buckets, got %d: %v", len(byHour), byHour)
+	}
+	want := []struct {
+		hour  string
+		count float64
+	}{
+		{"09", 2},
+		{"14", 1},
+		{"23", 1},
+	}
+	for i, wantBucket := range want {
+		bucket, _ := byHour[i].(map[string]interface{})
+		if bucket["hour"] != wantBucket.hour {
+			t.Errorf("position %d: expected hour=%s, got %v", i, wantBucket.hour, bucket["hour"])
+		}
+		if got, _ := bucket["count"].(float64); got != wantBucket.count {
+			t.Errorf("position %d: expected count=%v, got %v", i, wantBucket.count, got)
+		}
+	}
+}
+
+func TestMessagesByHourOfDay_HourPaddedTwoDigits(t *testing.T) {
+	// 1 桁の時間も "01" のようにゼロ詰めで返されること（lex 比較で昇順を保つため）。
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "p-0", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 1, 0, 30, 0, 0, time.UTC)},
+		{ID: "p-1", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 1, 5, 30, 0, 0, time.UTC)},
+		{ID: "p-2", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 1, 18, 30, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	byHour, _ := resp["by_hour"].([]interface{})
+	if len(byHour) != 3 {
+		t.Fatalf("expected 3 buckets, got %d", len(byHour))
+	}
+	gotHours := []string{}
+	for _, b := range byHour {
+		bucket, _ := b.(map[string]interface{})
+		gotHours = append(gotHours, bucket["hour"].(string))
+	}
+	want := []string{"00", "05", "18"}
+	for i, w := range want {
+		if gotHours[i] != w {
+			t.Errorf("position %d: expected hour=%s, got %s", i, w, gotHours[i])
+		}
+	}
+}
+
+func TestMessagesByHourOfDay_FiltersByChannel(t *testing.T) {
+	seedByHourOfDay(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day?channel=orders", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 2 {
+		t.Errorf("expected total=2 (orders only), got %v", resp["total"])
+	}
+	byHour, _ := resp["by_hour"].([]interface{})
+	if len(byHour) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(byHour))
+	}
+	h0, _ := byHour[0].(map[string]interface{})
+	h1, _ := byHour[1].(map[string]interface{})
+	if h0["hour"] != "14" || h1["hour"] != "23" {
+		t.Errorf("expected orders hours [14, 23], got [%v, %v]", h0["hour"], h1["hour"])
+	}
+}
+
+func TestMessagesByHourOfDay_FiltersBySinceUntil(t *testing.T) {
+	seedByHourOfDay(t)
+	// since/until で 1/2 だけを切り出す → hour=14 のみ
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/messages/by_hour_of_day?since=2030-01-02T00:00:00Z&until=2030-01-02T23:59:59Z",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 1 {
+		t.Errorf("expected total=1, got %v", resp["total"])
+	}
+	byHour, _ := resp["by_hour"].([]interface{})
+	if len(byHour) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(byHour))
+	}
+	h0, _ := byHour[0].(map[string]interface{})
+	if h0["hour"] != "14" {
+		t.Errorf("expected hour=14, got %v", h0["hour"])
+	}
+}
+
+func TestMessagesByHourOfDay_FiltersByQ(t *testing.T) {
+	seedByHourOfDay(t)
+	// payload "p1" は hour=09 のレコードのみ一致
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day?q=p1", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 1 {
+		t.Errorf("expected total=1, got %v", resp["total"])
+	}
+}
+
+func TestMessagesByHourOfDay_RejectsInvalidSince(t *testing.T) {
+	seedByHourOfDay(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesByHourOfDay_RejectsSinceGreaterThanUntil(t *testing.T) {
+	seedByHourOfDay(t)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/messages/by_hour_of_day?since=2030-12-01T00:00:00Z&until=2030-01-01T00:00:00Z",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesByHourOfDay_RejectsNonGet(t *testing.T) {
+	seedByHourOfDay(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/messages/by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestMessagesByHourOfDay_NormalizesToUTCAcrossLocations(t *testing.T) {
+	resetMessages()
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("Asia/Tokyo not available: %v", err)
+	}
+	// 2030-01-01T15:00:00Z (UTC 15 時) と
+	// 2030-01-02T00:00:00+09:00 (= UTC 15 時) はどちらも UTC hour=15 にビニングされる。
+	mu.Lock()
+	messages = []Message{
+		{ID: "u1", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 1, 15, 0, 0, 0, time.UTC)},
+		{ID: "u2", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 2, 0, 0, 0, 0, jst)},
+	}
+	mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	messagesByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	byHour, _ := resp["by_hour"].([]interface{})
+	if len(byHour) != 1 {
+		t.Fatalf("expected 1 bucket (same UTC hour), got %d: %v", len(byHour), byHour)
+	}
+	h0, _ := byHour[0].(map[string]interface{})
+	if h0["hour"] != "15" {
+		t.Errorf("expected hour=15, got %v", h0["hour"])
+	}
+	if c, _ := h0["count"].(float64); c != 2 {
+		t.Errorf("expected count=2, got %v", c)
+	}
+}
