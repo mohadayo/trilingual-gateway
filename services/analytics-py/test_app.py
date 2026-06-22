@@ -379,3 +379,130 @@ def test_list_property_values_missing_key_returns_empty_distribution(client):
     assert body["events_with_key"] == 0
     assert body["distinct_property_values"] == 0
     assert body["property_values"] == []
+
+
+# ---- GET /api/events/by_day ----
+
+
+def _seed_event_at(name, iso_ts, properties=None):
+    """テスト用に events_store へ直接イベントを差し込むヘルパ。
+
+    POST 経由だと timestamp が `datetime.now(timezone.utc)` で上書きされてしまい、
+    日付ビニングのテストが書けないため、ストアに直接 push する。テスト規約として
+    `setup_function` で毎回クリアされるので状態リークの心配は無い。
+    """
+    events_store.append({
+        "event_name": name,
+        "properties": properties or {},
+        "timestamp": iso_ts,
+    })
+
+
+def test_events_by_day_empty_store_returns_empty(client):
+    resp = client.get("/api/events/by_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_days": 0, "by_day": []}
+
+
+def test_events_by_day_groups_by_utc_date(client):
+    _seed_event_at("login", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("login", "2026-06-20T23:59:59+00:00")
+    _seed_event_at("login", "2026-06-21T00:00:00+00:00")
+    resp = client.get("/api/events/by_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 3
+    assert body["distinct_days"] == 2
+    assert body["by_day"] == [
+        {"day": "2026-06-20", "count": 2},
+        {"day": "2026-06-21", "count": 1},
+    ]
+
+
+def test_events_by_day_sorted_lex_ascending(client):
+    _seed_event_at("a", "2026-06-22T05:00:00+00:00")
+    _seed_event_at("a", "2026-06-01T05:00:00+00:00")
+    _seed_event_at("a", "2026-06-15T05:00:00+00:00")
+    resp = client.get("/api/events/by_day")
+    days = [row["day"] for row in resp.get_json()["by_day"]]
+    assert days == ["2026-06-01", "2026-06-15", "2026-06-22"]
+
+
+def test_events_by_day_filters_by_event_name(client):
+    _seed_event_at("login", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("logout", "2026-06-20T11:00:00+00:00")
+    _seed_event_at("login", "2026-06-21T10:00:00+00:00")
+    resp = client.get("/api/events/by_day?event_name=login")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_day"] == [
+        {"day": "2026-06-20", "count": 1},
+        {"day": "2026-06-21", "count": 1},
+    ]
+
+
+def test_events_by_day_filters_by_q_case_insensitive(client):
+    _seed_event_at("UserSignup", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("user_login", "2026-06-20T11:00:00+00:00")
+    _seed_event_at("page_view", "2026-06-21T10:00:00+00:00")
+    resp = client.get("/api/events/by_day?q=USER")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_days"] == 1
+
+
+def test_events_by_day_filters_by_since_until(client):
+    _seed_event_at("e", "2026-06-19T00:00:00+00:00")
+    _seed_event_at("e", "2026-06-20T00:00:00+00:00")
+    _seed_event_at("e", "2026-06-21T00:00:00+00:00")
+    _seed_event_at("e", "2026-06-22T00:00:00+00:00")
+    resp = client.get(
+        "/api/events/by_day?since=2026-06-20T00:00:00Z&until=2026-06-21T23:59:59Z"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_day"] == [
+        {"day": "2026-06-20", "count": 1},
+        {"day": "2026-06-21", "count": 1},
+    ]
+
+
+def test_events_by_day_converts_non_utc_timestamps_to_utc(client):
+    # JST 2026-06-21 08:00 → UTC 2026-06-20 23:00（前日になる）
+    _seed_event_at("evt", "2026-06-21T08:00:00+09:00")
+    # JST 2026-06-21 09:00 → UTC 2026-06-21 00:00（同日）
+    _seed_event_at("evt", "2026-06-21T09:00:00+09:00")
+    resp = client.get("/api/events/by_day")
+    body = resp.get_json()
+    assert body["distinct_days"] == 2
+    days = {row["day"]: row["count"] for row in body["by_day"]}
+    assert days == {"2026-06-20": 1, "2026-06-21": 1}
+
+
+def test_events_by_day_ignores_broken_timestamps(client):
+    _seed_event_at("good", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("bad_iso", "not-a-timestamp")
+    events_store.append({"event_name": "missing_ts", "properties": {}})
+    resp = client.get("/api/events/by_day")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_day"] == [{"day": "2026-06-20", "count": 1}]
+
+
+def test_events_by_day_invalid_since_returns_400(client):
+    resp = client.get("/api/events/by_day?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_events_by_day_since_greater_than_until_returns_400(client):
+    resp = client.get(
+        "/api/events/by_day?since=2026-06-22T00:00:00Z&until=2026-06-20T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_events_by_day_blank_q_returns_400(client):
+    resp = client.get("/api/events/by_day?q=%20%20%20")
+    assert resp.status_code == 400
