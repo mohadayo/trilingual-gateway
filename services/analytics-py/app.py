@@ -793,6 +793,87 @@ def list_property_values(key: str):
     })
 
 
+@app.route("/api/events/by_day", methods=["GET"])
+def events_by_day():
+    """フィルタ通過後のイベントを UTC 日付 (YYYY-MM-DD) でビニングし、
+    日付昇順の時系列カウントを返す軽量集計エンドポイント。
+
+    `/api/events` 全件取得 → クライアントビニングに比べて、`MAX_EVENTS` 上限近くまで
+    保持件数が増えた状況でのペイロード量・JSON エンコード時間を削減する。
+    `processor-go` 側の `/api/messages/by_day` と同じ集計ポリシーで、母集団 0 の
+    日付は省略する。日付は ISO 形式 (`YYYY-MM-DD`) の lex 昇順で固定（lex 順 =
+    時系列順）。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ
+    - `q`: event_name の部分一致（大文字小文字無視）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on by_day: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on by_day: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on by_day: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    counts: dict[str, int] = {}
+    for event in filtered:
+        # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
+        # 集計に含めない（`_filter_events_by_time` と同じ防御）。日付抽出も UTC へ
+        # 変換してから行い、日付境界での分裂を避ける（processor-go の by_day と同じ方針）。
+        raw_ts = event.get("timestamp")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        day = dt.strftime("%Y-%m-%d")
+        counts[day] = counts.get(day, 0) + 1
+
+    # ISO 日付 (`YYYY-MM-DD`) の lex 順は時系列順と一致するため、sorted で十分。
+    by_day = [{"day": d, "count": counts[d]} for d in sorted(counts.keys())]
+    total = sum(counts.values())
+    logger.info(
+        "by_day requested: total=%d distinct_days=%d (event_name=%s q=%s)",
+        total, len(by_day), event_name, q,
+    )
+    return jsonify({
+        "total": total,
+        "distinct_days": len(by_day),
+        "by_day": by_day,
+    })
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")
