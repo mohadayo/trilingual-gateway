@@ -467,6 +467,7 @@ app.get("/api/users/count", (req: Request, res: Response) => {
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
+    log("WARN", `GET /api/users/${req.params.id} not found`);
     res.status(404).json({ error: "user not found" });
     return;
   }
@@ -476,6 +477,7 @@ app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
 app.put("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
+    log("WARN", `PUT /api/users/${req.params.id} not found`);
     res.status(404).json({ error: "user not found" });
     return;
   }
@@ -511,6 +513,7 @@ app.put("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
 
 app.delete("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   if (!users.has(req.params.id)) {
+    log("WARN", `DELETE /api/users/${req.params.id} not found`);
     res.status(404).json({ error: "user not found" });
     return;
   }
