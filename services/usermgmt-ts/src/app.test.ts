@@ -233,6 +233,22 @@ describe("GET /api/users/:id", () => {
     const res = await request(app).get("/api/users/nonexistent");
     expect(res.status).toBe(404);
   });
+
+  it("logs a WARN when GET on unknown id returns 404", async () => {
+    const spy = jest.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await request(app).get("/api/users/ghost-id");
+      expect(res.status).toBe(404);
+      // 既存の "POST /api/users rejected: ..." と同じ書式
+      const warnLine = spy.mock.calls
+        .map((c) => String(c[0]))
+        .find((line) => line.includes("[WARN]") && line.includes("/api/users/ghost-id"));
+      expect(warnLine).toBeDefined();
+      expect(warnLine).toMatch(/GET \/api\/users\/ghost-id not found/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("PUT /api/users/:id", () => {
@@ -326,6 +342,23 @@ describe("PUT /api/users/:id", () => {
     expect(res.status).toBe(404);
   });
 
+  it("logs a WARN when PUT on unknown id returns 404", async () => {
+    const spy = jest.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await request(app)
+        .put("/api/users/ghost-id-2")
+        .send({ username: "x" });
+      expect(res.status).toBe(404);
+      const warnLine = spy.mock.calls
+        .map((c) => String(c[0]))
+        .find((line) => line.includes("[WARN]") && line.includes("/api/users/ghost-id-2"));
+      expect(warnLine).toBeDefined();
+      expect(warnLine).toMatch(/PUT \/api\/users\/ghost-id-2 not found/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("rejects empty update body", async () => {
     const created = await request(app)
       .post("/api/users")
@@ -383,6 +416,21 @@ describe("DELETE /api/users/:id", () => {
   it("returns 404 for unknown id", async () => {
     const res = await request(app).delete("/api/users/nonexistent");
     expect(res.status).toBe(404);
+  });
+
+  it("logs a WARN when DELETE on unknown id returns 404", async () => {
+    const spy = jest.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await request(app).delete("/api/users/ghost-id-3");
+      expect(res.status).toBe(404);
+      const warnLine = spy.mock.calls
+        .map((c) => String(c[0]))
+        .find((line) => line.includes("[WARN]") && line.includes("/api/users/ghost-id-3"));
+      expect(warnLine).toBeDefined();
+      expect(warnLine).toMatch(/DELETE \/api\/users\/ghost-id-3 not found/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
