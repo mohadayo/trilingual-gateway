@@ -506,3 +506,122 @@ def test_events_by_day_since_greater_than_until_returns_400(client):
 def test_events_by_day_blank_q_returns_400(client):
     resp = client.get("/api/events/by_day?q=%20%20%20")
     assert resp.status_code == 400
+
+
+# ---- GET /api/events/by_hour_of_day ----
+
+
+def test_events_by_hour_of_day_empty_store_returns_empty(client):
+    resp = client.get("/api/events/by_hour_of_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_hours": 0, "by_hour": []}
+
+
+def test_events_by_hour_of_day_groups_by_utc_hour(client):
+    _seed_event_at("login", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("login", "2026-06-20T10:59:59+00:00")
+    _seed_event_at("login", "2026-06-21T10:30:00+00:00")
+    _seed_event_at("login", "2026-06-20T23:00:00+00:00")
+    resp = client.get("/api/events/by_hour_of_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 4
+    assert body["distinct_hours"] == 2
+    assert body["by_hour"] == [
+        {"hour": "10", "count": 3},
+        {"hour": "23", "count": 1},
+    ]
+
+
+def test_events_by_hour_of_day_sorted_lex_ascending_with_zero_padding(client):
+    # 2 桁ゼロ詰め (`"01"`〜`"23"`) で lex 順 = 時間順になることを確認
+    _seed_event_at("a", "2026-06-22T23:00:00+00:00")
+    _seed_event_at("a", "2026-06-22T01:00:00+00:00")
+    _seed_event_at("a", "2026-06-22T09:00:00+00:00")
+    _seed_event_at("a", "2026-06-22T15:00:00+00:00")
+    resp = client.get("/api/events/by_hour_of_day")
+    hours = [row["hour"] for row in resp.get_json()["by_hour"]]
+    assert hours == ["01", "09", "15", "23"]
+
+
+def test_events_by_hour_of_day_filters_by_event_name(client):
+    _seed_event_at("login", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("logout", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("login", "2026-06-20T11:00:00+00:00")
+    resp = client.get("/api/events/by_hour_of_day?event_name=login")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_hour"] == [
+        {"hour": "10", "count": 1},
+        {"hour": "11", "count": 1},
+    ]
+
+
+def test_events_by_hour_of_day_filters_by_q_case_insensitive(client):
+    _seed_event_at("UserSignup", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("user_login", "2026-06-20T10:30:00+00:00")
+    _seed_event_at("page_view", "2026-06-20T11:00:00+00:00")
+    resp = client.get("/api/events/by_hour_of_day?q=USER")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_hours"] == 1
+    assert body["by_hour"] == [{"hour": "10", "count": 2}]
+
+
+def test_events_by_hour_of_day_filters_by_since_until(client):
+    _seed_event_at("e", "2026-06-20T09:00:00+00:00")
+    _seed_event_at("e", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("e", "2026-06-20T11:00:00+00:00")
+    _seed_event_at("e", "2026-06-20T12:00:00+00:00")
+    resp = client.get(
+        "/api/events/by_hour_of_day?since=2026-06-20T10:00:00Z&until=2026-06-20T11:30:00Z"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_hour"] == [
+        {"hour": "10", "count": 1},
+        {"hour": "11", "count": 1},
+    ]
+
+
+def test_events_by_hour_of_day_converts_non_utc_timestamps_to_utc(client):
+    # JST 2026-06-21 08:00 → UTC 2026-06-20 23:00 (hour=23)
+    _seed_event_at("evt", "2026-06-21T08:00:00+09:00")
+    # JST 2026-06-21 09:00 → UTC 2026-06-21 00:00 (hour=00)
+    _seed_event_at("evt", "2026-06-21T09:00:00+09:00")
+    # JST 2026-06-21 10:00 → UTC 2026-06-21 01:00 (hour=01)
+    _seed_event_at("evt", "2026-06-21T10:00:00+09:00")
+    resp = client.get("/api/events/by_hour_of_day")
+    body = resp.get_json()
+    assert body["distinct_hours"] == 3
+    hours = {row["hour"]: row["count"] for row in body["by_hour"]}
+    assert hours == {"23": 1, "00": 1, "01": 1}
+
+
+def test_events_by_hour_of_day_ignores_broken_timestamps(client):
+    _seed_event_at("good", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("bad_iso", "not-a-timestamp")
+    events_store.append({"event_name": "missing_ts", "properties": {}})
+    resp = client.get("/api/events/by_hour_of_day")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_hour"] == [{"hour": "10", "count": 1}]
+
+
+def test_events_by_hour_of_day_invalid_since_returns_400(client):
+    resp = client.get("/api/events/by_hour_of_day?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_events_by_hour_of_day_since_greater_than_until_returns_400(client):
+    resp = client.get(
+        "/api/events/by_hour_of_day?since=2026-06-22T00:00:00Z&until=2026-06-20T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_events_by_hour_of_day_blank_q_returns_400(client):
+    resp = client.get("/api/events/by_hour_of_day?q=%20%20%20")
+    assert resp.status_code == 400
