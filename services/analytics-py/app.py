@@ -659,7 +659,7 @@ def list_property_values(key: str):
         - `q`: event_name の部分一致（大文字小文字無視）
         - `since` / `until`: ISO8601 範囲フィルタ
         - `sort`: `count` (既定) または `value`。
-        - `order`: `asc` / `desc`（既定 `desc`、頻度の高い順）。
+        - `order`: `asc` / `desc`(既定 `desc`、頻度の高い順)。
         - `limit` / `offset`: DEFAULT_PAGE_LIMIT / MAX_PAGE_LIMIT を流用。
 
     値の型は str / int / float / bool / None を許容。dict / list 等の非スカラ型は
@@ -871,6 +871,87 @@ def events_by_day():
         "total": total,
         "distinct_days": len(by_day),
         "by_day": by_day,
+    })
+
+
+@app.route("/api/events/by_hour_of_day", methods=["GET"])
+def events_by_hour_of_day():
+    """フィルタ通過後のイベントを UTC の時刻 (`"00"`〜`"23"`) でビニングし、
+    時刻昇順の周期的カウントを返す軽量集計エンドポイント。
+
+    `/api/events/by_day` が「いつ」流量があったかを直線的な時系列で見るのに対し、
+    本エンドポイントは「1 日のうち、どの時間帯に流量が集中しているか」を 1 リクエスト
+    で把握するための周期的集計。`processor-go` 側の `/api/messages/by_hour_of_day`
+    と同じ集計ポリシーで、母集団 0 の時間帯は省略する。
+    時刻は 2 桁ゼロ詰め (`"00"`〜`"23"`) なので lex 順 = 時間順になる。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ
+    - `q`: event_name の部分一致（大文字小文字無視）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on by_hour_of_day: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on by_hour_of_day: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on by_hour_of_day: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    counts: dict[str, int] = {}
+    for event in filtered:
+        # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
+        # 集計に含めない（`_filter_events_by_time` と同じ防御）。時刻抽出も UTC へ
+        # 変換してから行い、時刻境界での分裂を避ける（by_day と同じ方針）。
+        raw_ts = event.get("timestamp")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        hour = dt.strftime("%H")
+        counts[hour] = counts.get(hour, 0) + 1
+
+    # 2 桁ゼロ詰め時刻 (`"00"`〜`"23"`) は lex 順 = 時間順なので sorted で十分。
+    by_hour = [{"hour": h, "count": counts[h]} for h in sorted(counts.keys())]
+    total = sum(counts.values())
+    logger.info(
+        "by_hour_of_day requested: total=%d distinct_hours=%d (event_name=%s q=%s)",
+        total, len(by_hour), event_name, q,
+    )
+    return jsonify({
+        "total": total,
+        "distinct_hours": len(by_hour),
+        "by_hour": by_hour,
     })
 
 
