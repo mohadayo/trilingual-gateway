@@ -1,8 +1,9 @@
 import os
 import logging
 import threading
+import time
 from datetime import datetime, timezone
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -11,6 +12,46 @@ logging.basicConfig(
 logger = logging.getLogger("analytics")
 
 app = Flask(__name__)
+
+
+@app.before_request
+def _access_log_start():
+    """リクエスト着信時刻を Flask の `g` に積み、応答時に消費する。
+
+    ``time.perf_counter_ns()`` を使い、ウォールクロック補正に左右されない
+    単調増加な計測を行う（システムタイムジャンプで負値にならない）。
+    """
+    g._access_log_start_ns = time.perf_counter_ns()
+
+
+@app.after_request
+def _access_log_end(response):
+    """応答ステータスと処理時間を 1 行の INFO ログに集約する。
+
+    各ハンドラ内の ``logger.info(...)`` は機能単位の出来事を記録するもので、
+    HTTP リクエスト横断で「method/path/status/duration」を一貫して観測する
+    軸が無かった。本ミドルウェアでアクセスログを集約することで、ハンドラ側
+    ログを追わなくとも 4xx 偏りや遅延傾向を構造化ログから即座に追える。
+
+    レスポンスヘッダ ``X-Response-Time-Ms`` にも同値を返し、クライアント側
+    (BFF / SPA) からも応答時間が読み取れるようにする。``before_request`` を
+    経ない極端な経路（WSGI スタック側の異常等）は ``g._access_log_start_ns``
+    が未設定なので duration を出さずに早期 return する。
+    """
+    start_ns = getattr(g, "_access_log_start_ns", None)
+    if start_ns is None:
+        return response
+    duration_ms = round((time.perf_counter_ns() - start_ns) / 1_000_000.0, 3)
+    logger.info(
+        "%s %s -> %d (%.3fms)",
+        request.method,
+        request.path,
+        response.status_code,
+        duration_ms,
+    )
+    response.headers["X-Response-Time-Ms"] = f"{duration_ms}"
+    return response
+
 
 events_store: list[dict] = []
 events_lock = threading.Lock()
@@ -547,7 +588,7 @@ def list_property_keys():
     - `event_name`: 完全一致フィルタ（既存 `/summary` `/count` と同じ）
     - `q`: event_name の部分一致（大文字小文字無視、既存と同じ）
     - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
-    - `order`: `asc` / `desc`（既定 `asc`、キー名の昇順）
+    - `order`: `asc` / `desc`(既定 `asc`、キー名の昇順)
     - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用してページング
     """
     event_name = request.args.get("event_name")
