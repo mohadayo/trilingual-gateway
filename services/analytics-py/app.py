@@ -996,6 +996,90 @@ def events_by_hour_of_day():
     })
 
 
+@app.route("/api/events/by_day_of_week", methods=["GET"])
+def events_by_day_of_week():
+    """フィルタ通過後のイベントを UTC の ISO 8601 曜日 (`"1"`=月曜〜`"7"`=日曜) で
+    ビニングし、曜日昇順の周期的カウントを返す軽量集計エンドポイント。
+
+    `/api/events/by_day` が日単位の直線的な時系列、`/api/events/by_hour_of_day` が
+    1 日内の時刻別分布を見るのに対し、本エンドポイントは「曜日ごとにどう分布して
+    いるか」という周期的パターン（平日 vs 週末 / 月曜は多い等）を 1 リクエスト
+    で把握する。`processor-go` 側の `/api/messages/by_day_of_week` と同じ集計
+    ポリシーで、母集団 0 の曜日は省略する。
+
+    キーは ISO 8601 曜日 (1=月曜〜7=日曜) の単一桁文字列なので lex 順 = 曜日順。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ
+    - `q`: event_name の部分一致（大文字小文字無視）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on by_day_of_week: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on by_day_of_week: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on by_day_of_week: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    counts: dict[str, int] = {}
+    for event in filtered:
+        # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
+        # 集計に含めない（by_hour_of_day と同じ防御）。曜日抽出も UTC 正規化後に
+        # 行い、tz 越境で曜日が変わるケースに耐える。
+        raw_ts = event.get("timestamp")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        # isoweekday(): 1=月曜〜7=日曜
+        dow = str(dt.isoweekday())
+        counts[dow] = counts.get(dow, 0) + 1
+
+    # "1"〜"7" の単一桁文字列は lex 順 = 曜日順なので sorted で十分。
+    by_day_of_week = [{"day_of_week": d, "count": counts[d]} for d in sorted(counts.keys())]
+    total = sum(counts.values())
+    logger.info(
+        "by_day_of_week requested: total=%d distinct_days_of_week=%d (event_name=%s q=%s)",
+        total, len(by_day_of_week), event_name, q,
+    )
+    return jsonify({
+        "total": total,
+        "distinct_days_of_week": len(by_day_of_week),
+        "by_day_of_week": by_day_of_week,
+    })
+
+
 @app.route("/api/events/summary", methods=["GET"])
 def events_summary():
     event_name = request.args.get("event_name")

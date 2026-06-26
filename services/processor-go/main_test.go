@@ -2630,3 +2630,249 @@ func TestMessagesByHourOfDay_NormalizesToUTCAcrossLocations(t *testing.T) {
 		t.Errorf("expected count=2, got %v", c)
 	}
 }
+
+// seedByDayOfWeek は 4 件のメッセージを月曜・火曜・日曜にビニングできる
+// 日付で作成する。`by_day_of_week` の集計・並び順の検証用。
+//   - 2030-01-07 月曜（ISO 8601 で 1）× 2
+//   - 2030-01-08 火曜（ISO 8601 で 2）× 1
+//   - 2030-01-13 日曜（ISO 8601 で 7）× 1
+func seedByDayOfWeek(t *testing.T) {
+	t.Helper()
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "d-1", Channel: "alerts", Payload: "p1", CreatedAt: time.Date(2030, 1, 7, 10, 0, 0, 0, time.UTC)},
+		{ID: "d-2", Channel: "alerts", Payload: "p2", CreatedAt: time.Date(2030, 1, 7, 20, 0, 0, 0, time.UTC)},
+		{ID: "d-3", Channel: "orders", Payload: "p3", CreatedAt: time.Date(2030, 1, 8, 12, 0, 0, 0, time.UTC)},
+		{ID: "d-4", Channel: "orders", Payload: "p4", CreatedAt: time.Date(2030, 1, 13, 22, 0, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+}
+
+func TestMessagesByDayOfWeek_EmptyStoreReturnsEmpty(t *testing.T) {
+	resetMessages()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 0 {
+		t.Errorf("expected total=0, got %v", resp["total"])
+	}
+	if distinct, _ := resp["distinct_days_of_week"].(float64); distinct != 0 {
+		t.Errorf("expected distinct_days_of_week=0, got %v", resp["distinct_days_of_week"])
+	}
+	byDow, ok := resp["by_day_of_week"].([]interface{})
+	if !ok {
+		t.Fatalf("expected by_day_of_week array, got %T", resp["by_day_of_week"])
+	}
+	if len(byDow) != 0 {
+		t.Errorf("expected empty by_day_of_week, got %v", byDow)
+	}
+}
+
+func TestMessagesByDayOfWeek_BasicChronologicalOrder(t *testing.T) {
+	seedByDayOfWeek(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 4 {
+		t.Errorf("expected total=4, got %v", resp["total"])
+	}
+	if distinct, _ := resp["distinct_days_of_week"].(float64); distinct != 3 {
+		t.Errorf("expected distinct_days_of_week=3, got %v", resp["distinct_days_of_week"])
+	}
+	byDow, _ := resp["by_day_of_week"].([]interface{})
+	if len(byDow) != 3 {
+		t.Fatalf("expected 3 buckets, got %d: %v", len(byDow), byDow)
+	}
+	want := []struct {
+		dow   string
+		count float64
+	}{
+		{"1", 2},
+		{"2", 1},
+		{"7", 1},
+	}
+	for i, wantBucket := range want {
+		bucket, _ := byDow[i].(map[string]interface{})
+		if bucket["day_of_week"] != wantBucket.dow {
+			t.Errorf("position %d: expected day_of_week=%s, got %v", i, wantBucket.dow, bucket["day_of_week"])
+		}
+		if got, _ := bucket["count"].(float64); got != wantBucket.count {
+			t.Errorf("position %d: expected count=%v, got %v", i, wantBucket.count, got)
+		}
+	}
+}
+
+func TestMessagesByDayOfWeek_SundayMapsToISO7(t *testing.T) {
+	// time.Weekday() は Sunday=0 を返すので、ISO 8601 の 7 への変換が
+	// 取りこぼされていないかを単独でガードする。
+	resetMessages()
+	mu.Lock()
+	messages = []Message{
+		{ID: "sun-1", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 13, 12, 0, 0, 0, time.UTC)},
+	}
+	mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	byDow, _ := resp["by_day_of_week"].([]interface{})
+	if len(byDow) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(byDow))
+	}
+	bucket, _ := byDow[0].(map[string]interface{})
+	if bucket["day_of_week"] != "7" {
+		t.Errorf("expected day_of_week=7 for Sunday, got %v", bucket["day_of_week"])
+	}
+}
+
+func TestMessagesByDayOfWeek_FiltersByChannel(t *testing.T) {
+	seedByDayOfWeek(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week?channel=orders", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 2 {
+		t.Errorf("expected total=2, got %v", resp["total"])
+	}
+	byDow, _ := resp["by_day_of_week"].([]interface{})
+	if len(byDow) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(byDow))
+	}
+	d0, _ := byDow[0].(map[string]interface{})
+	d1, _ := byDow[1].(map[string]interface{})
+	if d0["day_of_week"] != "2" || d1["day_of_week"] != "7" {
+		t.Errorf("expected orders days [2, 7], got [%v, %v]", d0["day_of_week"], d1["day_of_week"])
+	}
+}
+
+func TestMessagesByDayOfWeek_FiltersBySinceUntil(t *testing.T) {
+	seedByDayOfWeek(t)
+	// since/until で 2030-01-08 だけを切り出す → 火曜 (2) のみ
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/messages/by_day_of_week?since=2030-01-08T00:00:00Z&until=2030-01-08T23:59:59Z",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 1 {
+		t.Errorf("expected total=1, got %v", resp["total"])
+	}
+	byDow, _ := resp["by_day_of_week"].([]interface{})
+	if len(byDow) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(byDow))
+	}
+	d0, _ := byDow[0].(map[string]interface{})
+	if d0["day_of_week"] != "2" {
+		t.Errorf("expected day_of_week=2, got %v", d0["day_of_week"])
+	}
+}
+
+func TestMessagesByDayOfWeek_FiltersByQ(t *testing.T) {
+	seedByDayOfWeek(t)
+	// payload "p1" は月曜 (1) のレコードのみ一致
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week?q=p1", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if total, _ := resp["total"].(float64); total != 1 {
+		t.Errorf("expected total=1, got %v", resp["total"])
+	}
+}
+
+func TestMessagesByDayOfWeek_RejectsInvalidSince(t *testing.T) {
+	seedByDayOfWeek(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesByDayOfWeek_RejectsSinceGreaterThanUntil(t *testing.T) {
+	seedByDayOfWeek(t)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/messages/by_day_of_week?since=2030-12-01T00:00:00Z&until=2030-01-01T00:00:00Z",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMessagesByDayOfWeek_RejectsNonGet(t *testing.T) {
+	seedByDayOfWeek(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/messages/by_day_of_week", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestMessagesByDayOfWeek_NormalizesToUTCAcrossLocations(t *testing.T) {
+	resetMessages()
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("Asia/Tokyo not available: %v", err)
+	}
+	// 2030-01-13 (日曜) 23:00 UTC と 2030-01-14 (月曜) 08:00 JST
+	// は同一の UTC 時刻 → どちらも日曜 (7) にビニングされる。
+	mu.Lock()
+	messages = []Message{
+		{ID: "u1", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 13, 23, 0, 0, 0, time.UTC)},
+		{ID: "u2", Channel: "c", Payload: "p", CreatedAt: time.Date(2030, 1, 14, 8, 0, 0, 0, jst)},
+	}
+	mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/by_day_of_week", nil)
+	w := httptest.NewRecorder()
+	messagesByDayOfWeekHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	byDow, _ := resp["by_day_of_week"].([]interface{})
+	if len(byDow) != 1 {
+		t.Fatalf("expected 1 bucket (same UTC day), got %d", len(byDow))
+	}
+	d0, _ := byDow[0].(map[string]interface{})
+	if d0["day_of_week"] != "7" {
+		t.Errorf("expected day_of_week=7, got %v", d0["day_of_week"])
+	}
+	if c, _ := d0["count"].(float64); c != 2 {
+		t.Errorf("expected count=2, got %v", c)
+	}
+}

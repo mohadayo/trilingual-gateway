@@ -953,6 +953,79 @@ func messagesByHourOfDayHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// messagesByDayOfWeekHandler は filters 通過後のメッセージを UTC の ISO 8601 曜日
+// (1=月曜〜7=日曜) でビニングし、曜日昇順の分布を返す。日付や時刻には依存しない
+// 「曜日別の流量」を見るための軽量集計エンドポイント。
+//
+// /api/messages/by_day が日単位の直線的な時系列、/api/messages/by_hour_of_day が
+// 1 日内の時刻別分布を見るのに対し、本ハンドラは曜日周期のパターン
+// (平日 vs 週末、月曜は多い等) を 1 リクエストで把握する用途。マーケティングの
+// キャンペーン効果分析や SRE の曜日別キャパシティプランニングで使う。
+//
+// 集計キーは "1"〜"7" の文字列 (ISO 8601 曜日)。文字列のまま辞書順 = 曜日順。
+// 母集団 0 の曜日は省略する (by_day / by_hour_of_day と同じ populated-only 方針)。
+// フィルタは parseMessageFilters を再利用する。
+func messagesByDayOfWeekHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	mu.RLock()
+	counts := make(map[string]int)
+	total := 0
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		// UTC に正規化してから ISO 8601 曜日 (1=月曜〜7=日曜) を取り出す。
+		// time.Weekday() は 0=日曜〜6=土曜の順なので、ISO 8601 にマップする。
+		wd := m.CreatedAt.UTC().Weekday()
+		var iso int
+		if wd == time.Sunday {
+			iso = 7
+		} else {
+			iso = int(wd)
+		}
+		key := fmt.Sprintf("%d", iso)
+		counts[key]++
+		total++
+	}
+	mu.RUnlock()
+
+	// 曜日昇順で固定。"1"〜"7" は単一桁なので lex 順 = 曜日順、sort.Strings で十分。
+	days := make([]string, 0, len(counts))
+	for d := range counts {
+		days = append(days, d)
+	}
+	sort.Strings(days)
+	byDayOfWeek := make([]map[string]interface{}, 0, len(days))
+	for _, d := range days {
+		byDayOfWeek = append(byDayOfWeek, map[string]interface{}{
+			"day_of_week": d,
+			"count":       counts[d],
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":                 total,
+		"distinct_days_of_week": len(byDayOfWeek),
+		"by_day_of_week":        byDayOfWeek,
+	})
+}
+
 func main() {
 	port := os.Getenv("PROCESSOR_PORT")
 	if port == "" {
@@ -981,6 +1054,7 @@ func main() {
 	// 日別の時系列カウント（リテラル `by_day` も `{id}` より優先される）。
 	mux.HandleFunc("GET /api/messages/by_day", messagesByDayHandler)
 	mux.HandleFunc("GET /api/messages/by_hour_of_day", messagesByHourOfDayHandler)
+	mux.HandleFunc("GET /api/messages/by_day_of_week", messagesByDayOfWeekHandler)
 	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
 	// `/api/messages/{id}` (単一) は別経路として共存する。
 	// 単一 path で GET と DELETE は別ハンドラに振り分け、URL 設計をシンメトリックに保つ。

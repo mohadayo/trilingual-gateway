@@ -625,3 +625,130 @@ def test_events_by_hour_of_day_since_greater_than_until_returns_400(client):
 def test_events_by_hour_of_day_blank_q_returns_400(client):
     resp = client.get("/api/events/by_hour_of_day?q=%20%20%20")
     assert resp.status_code == 400
+
+
+# ---- GET /api/events/by_day_of_week ----
+
+
+def test_events_by_day_of_week_empty_store_returns_empty(client):
+    resp = client.get("/api/events/by_day_of_week")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_days_of_week": 0, "by_day_of_week": []}
+
+
+def test_events_by_day_of_week_groups_by_iso_weekday(client):
+    # 2026-06-22 月曜 (1), 2026-06-23 火曜 (2), 2026-06-28 日曜 (7)
+    _seed_event_at("login", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("login", "2026-06-22T22:00:00+00:00")
+    _seed_event_at("login", "2026-06-23T08:00:00+00:00")
+    _seed_event_at("login", "2026-06-28T15:00:00+00:00")
+    resp = client.get("/api/events/by_day_of_week")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 4
+    assert body["distinct_days_of_week"] == 3
+    assert body["by_day_of_week"] == [
+        {"day_of_week": "1", "count": 2},
+        {"day_of_week": "2", "count": 1},
+        {"day_of_week": "7", "count": 1},
+    ]
+
+
+def test_events_by_day_of_week_sorted_lex_ascending(client):
+    # "1"〜"7" の単一桁文字列は lex 順 = 曜日順
+    _seed_event_at("a", "2026-06-28T10:00:00+00:00")  # 日 (7)
+    _seed_event_at("a", "2026-06-22T10:00:00+00:00")  # 月 (1)
+    _seed_event_at("a", "2026-06-25T10:00:00+00:00")  # 木 (4)
+    _seed_event_at("a", "2026-06-23T10:00:00+00:00")  # 火 (2)
+    resp = client.get("/api/events/by_day_of_week")
+    days = [row["day_of_week"] for row in resp.get_json()["by_day_of_week"]]
+    assert days == ["1", "2", "4", "7"]
+
+
+def test_events_by_day_of_week_sunday_maps_to_seven(client):
+    # 2026-06-28 は日曜 → ISO 8601 で 7
+    _seed_event_at("evt", "2026-06-28T12:00:00+00:00")
+    resp = client.get("/api/events/by_day_of_week")
+    body = resp.get_json()
+    assert body["by_day_of_week"] == [{"day_of_week": "7", "count": 1}]
+
+
+def test_events_by_day_of_week_filters_by_event_name(client):
+    _seed_event_at("login", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("logout", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("login", "2026-06-23T11:00:00+00:00")
+    resp = client.get("/api/events/by_day_of_week?event_name=login")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_day_of_week"] == [
+        {"day_of_week": "1", "count": 1},
+        {"day_of_week": "2", "count": 1},
+    ]
+
+
+def test_events_by_day_of_week_filters_by_q_case_insensitive(client):
+    _seed_event_at("UserSignup", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("user_login", "2026-06-22T10:30:00+00:00")
+    _seed_event_at("page_view", "2026-06-23T11:00:00+00:00")
+    resp = client.get("/api/events/by_day_of_week?q=USER")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_days_of_week"] == 1
+    assert body["by_day_of_week"] == [{"day_of_week": "1", "count": 2}]
+
+
+def test_events_by_day_of_week_filters_by_since_until(client):
+    # 4 つの曜日に分散
+    _seed_event_at("e", "2026-06-22T09:00:00+00:00")  # 月 (1)
+    _seed_event_at("e", "2026-06-23T10:00:00+00:00")  # 火 (2)
+    _seed_event_at("e", "2026-06-24T11:00:00+00:00")  # 水 (3)
+    _seed_event_at("e", "2026-06-25T12:00:00+00:00")  # 木 (4)
+    resp = client.get(
+        "/api/events/by_day_of_week?since=2026-06-23T00:00:00Z&until=2026-06-24T23:59:59Z"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_day_of_week"] == [
+        {"day_of_week": "2", "count": 1},
+        {"day_of_week": "3", "count": 1},
+    ]
+
+
+def test_events_by_day_of_week_converts_non_utc_timestamps_to_utc(client):
+    # 2026-06-29 月曜 02:00 JST → UTC 2026-06-28 17:00 (日曜=7)
+    _seed_event_at("evt", "2026-06-29T02:00:00+09:00")
+    # 2026-06-23 火曜 02:00 UTC → 火曜 (2)
+    _seed_event_at("evt", "2026-06-23T02:00:00+00:00")
+    resp = client.get("/api/events/by_day_of_week")
+    body = resp.get_json()
+    counts = {row["day_of_week"]: row["count"] for row in body["by_day_of_week"]}
+    assert counts == {"7": 1, "2": 1}
+
+
+def test_events_by_day_of_week_ignores_broken_timestamps(client):
+    _seed_event_at("good", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("bad_iso", "not-a-timestamp")
+    events_store.append({"event_name": "missing_ts", "properties": {}})
+    resp = client.get("/api/events/by_day_of_week")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_day_of_week"] == [{"day_of_week": "1", "count": 1}]
+
+
+def test_events_by_day_of_week_invalid_since_returns_400(client):
+    resp = client.get("/api/events/by_day_of_week?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_events_by_day_of_week_since_greater_than_until_returns_400(client):
+    resp = client.get(
+        "/api/events/by_day_of_week?since=2026-06-22T00:00:00Z&until=2026-06-20T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_events_by_day_of_week_blank_q_returns_400(client):
+    resp = client.get("/api/events/by_day_of_week?q=%20%20%20")
+    assert resp.status_code == 400
