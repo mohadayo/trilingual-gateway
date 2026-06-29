@@ -464,6 +464,74 @@ app.get("/api/users/count", (req: Request, res: Response) => {
   });
 });
 
+// `/api/users/:id` より前に登録して、`:id == "by_day_of_week"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は集計では意味を持たないため無視する。
+//
+// 集計は UTC 上の ISO 8601 曜日 (1=月曜〜7=日曜) で行う。
+// JavaScript の `Date.getUTCDay()` は 0=日曜〜6=土曜を返すため、
+// `(day === 0 ? 7 : day)` で ISO 8601 に正規化する。
+// populated-only: 母集団 0 の曜日は配列に含めない（`processor-go`/`analytics-py`
+// の `by_day_of_week` と同じ方針）。
+app.get("/api/users/by_day_of_week", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/by_day_of_week rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // ISO 8601 曜日キー ("1"〜"7") → 件数。
+  // 壊れた `created_at` (パース不能) は安全側で集計対象外。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const u of list) {
+    const ts = new Date(u.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const day = ts.getUTCDay(); // 0=Sun..6=Sat
+    const iso = day === 0 ? 7 : day; // 1=Mon..7=Sun
+    const key = String(iso);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 曜日キーの lex 昇順 = 曜日順 ("1" < "2" < ... < "7")。
+  // populated-only: 値が 0 の曜日は含めない。
+  const byDayOfWeek = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([day_of_week, count]) => ({ day_of_week, count }));
+
+  res.json({
+    total,
+    distinct_days_of_week: byDayOfWeek.length,
+    by_day_of_week: byDayOfWeek,
+  });
+});
+
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {

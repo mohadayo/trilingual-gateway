@@ -871,3 +871,199 @@ describe("GET /api/users/count", () => {
     expect(res.body.oldest_created_at).not.toBe(earliest.body.created_at);
   });
 });
+
+describe("GET /api/users/by_day_of_week", () => {
+  // 既存 seed 関数（`GET /api/users created_at range filter` の下にある）と同じ
+  // パターン。POST だと `created_at` が現在時刻になり曜日を制御できないため、
+  // `users.set` で直接挿入する。
+  function seed(
+    date: string,
+    idx: number,
+    role: "user" | "admin" | "moderator" = "user",
+    extra?: { username?: string; email?: string },
+  ): string {
+    const id = `seed-dow-${idx}-${Date.now()}`;
+    users.set(id, {
+      id,
+      username: extra?.username ?? `user${idx}`,
+      email: extra?.email ?? `user${idx}@example.com`,
+      role,
+      created_at: date,
+      updated_at: date,
+    });
+    return id;
+  }
+
+  it("returns empty aggregation on empty store", async () => {
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(0);
+    expect(res.body.distinct_days_of_week).toBe(0);
+    expect(res.body.by_day_of_week).toEqual([]);
+  });
+
+  it("aggregates by ISO 8601 UTC weekday (1=Mon ... 7=Sun)", async () => {
+    // 既知の UTC 日付を選び、ISO 曜日への変換を確認する。
+    // 2026-01-05 = Monday → "1"
+    // 2026-01-06 = Tuesday → "2"
+    // 2026-01-07 = Wednesday → "3"
+    // 2026-01-08 = Thursday → "4"
+    // 2026-01-09 = Friday → "5"
+    // 2026-01-10 = Saturday → "6"
+    // 2026-01-11 = Sunday → "7"
+    seed("2026-01-05T00:00:00Z", 1);
+    seed("2026-01-05T12:00:00Z", 2); // 同じ月曜
+    seed("2026-01-07T00:00:00Z", 3);
+    seed("2026-01-11T00:00:00Z", 4); // 日曜 → "7"
+
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(4);
+    expect(res.body.distinct_days_of_week).toBe(3);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "1", count: 2 },
+      { day_of_week: "3", count: 1 },
+      { day_of_week: "7", count: 1 },
+    ]);
+  });
+
+  it("results are sorted in lexical (= weekday) ascending order", async () => {
+    // バラバラの挿入順でも結果は常に "1" → "7" の昇順。
+    seed("2026-01-11T00:00:00Z", 1); // Sun
+    seed("2026-01-05T00:00:00Z", 2); // Mon
+    seed("2026-01-08T00:00:00Z", 3); // Thu
+    seed("2026-01-06T00:00:00Z", 4); // Tue
+
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    const keys = res.body.by_day_of_week.map(
+      (b: { day_of_week: string }) => b.day_of_week,
+    );
+    expect(keys).toEqual(["1", "2", "4", "7"]);
+  });
+
+  it("does not include buckets with zero count (populated-only)", async () => {
+    // 1 件しか挿入しなければ、その曜日以外は配列に含まれない。
+    seed("2026-01-05T00:00:00Z", 1); // Mon → "1"
+
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "1", count: 1 },
+    ]);
+    expect(res.body.distinct_days_of_week).toBe(1);
+  });
+
+  it("filters by ?role=", async () => {
+    seed("2026-01-05T00:00:00Z", 1, "admin");
+    seed("2026-01-05T00:00:00Z", 2, "user");
+    seed("2026-01-06T00:00:00Z", 3, "admin");
+
+    const res = await request(app).get(
+      "/api/users/by_day_of_week?role=admin",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "1", count: 1 },
+      { day_of_week: "2", count: 1 },
+    ]);
+  });
+
+  it("filters by ?q= (case-insensitive partial match)", async () => {
+    seed("2026-01-05T00:00:00Z", 1, "user", { username: "alice", email: "alice@x.com" });
+    seed("2026-01-05T00:00:00Z", 2, "user", { username: "bob", email: "bob@x.com" });
+    seed("2026-01-06T00:00:00Z", 3, "user", { username: "alex", email: "alex@x.com" });
+
+    const res = await request(app).get("/api/users/by_day_of_week?q=al");
+    expect(res.status).toBe(200);
+    // alice (Mon) + alex (Tue) のみ
+    expect(res.body.total).toBe(2);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "1", count: 1 },
+      { day_of_week: "2", count: 1 },
+    ]);
+  });
+
+  it("filters by since/until range on created_at", async () => {
+    seed("2026-01-05T00:00:00Z", 1); // Mon
+    seed("2026-01-12T00:00:00Z", 2); // Mon (1 週間後)
+    seed("2026-01-19T00:00:00Z", 3); // Mon (2 週間後)
+
+    // 2026-01-12 (含む) ～ 2026-01-19 (含まない、since から見て一致) で絞る
+    const res = await request(app).get(
+      "/api/users/by_day_of_week?since=2026-01-12T00:00:00Z&until=2026-01-19T00:00:00Z",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "1", count: 2 },
+    ]);
+  });
+
+  it("returns 400 for invalid role", async () => {
+    const res = await request(app).get(
+      "/api/users/by_day_of_week?role=superuser",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("role");
+  });
+
+  it("returns 400 for invalid since", async () => {
+    const res = await request(app).get(
+      "/api/users/by_day_of_week?since=not-a-date",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("since");
+  });
+
+  it("returns 400 when since > until", async () => {
+    const res = await request(app).get(
+      "/api/users/by_day_of_week?since=2026-02-01T00:00:00Z&until=2026-01-01T00:00:00Z",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("until");
+  });
+
+  it("does not collide with /api/users/:id (route order)", async () => {
+    // ルートの登録順で /api/users/by_day_of_week は /api/users/:id より先。
+    // パスをこの文字列で呼んでも 404 にはならず、集計が返ること。
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("by_day_of_week");
+    expect(res.body).not.toHaveProperty("error");
+  });
+
+  it("normalizes non-UTC timestamps via UTC conversion", async () => {
+    // 入力 created_at が +09:00 オフセットで、現地時刻と UTC で曜日が変わるケース。
+    // 2026-01-05 00:00:00 +09:00 → UTC では 2026-01-04 15:00:00 (Sun → "7")。
+    seed("2026-01-05T00:00:00+09:00", 1);
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "7", count: 1 },
+    ]);
+  });
+
+  it("skips users with malformed created_at (safe fallback)", async () => {
+    // 不正な created_at を持つユーザは集計から除外され、total が下がる。
+    const id = `seed-broken-${Date.now()}`;
+    users.set(id, {
+      id,
+      username: "broken",
+      email: "broken@example.com",
+      role: "user",
+      created_at: "not-a-valid-date",
+      updated_at: "not-a-valid-date",
+    });
+    seed("2026-01-05T00:00:00Z", 99); // Mon - 集計対象
+
+    const res = await request(app).get("/api/users/by_day_of_week");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.by_day_of_week).toEqual([
+      { day_of_week: "1", count: 1 },
+    ]);
+  });
+});
