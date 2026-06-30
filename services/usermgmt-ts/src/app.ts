@@ -532,6 +532,73 @@ app.get("/api/users/by_day_of_week", (req: Request, res: Response) => {
   });
 });
 
+// `/api/users/:id` より前に登録して、`:id == "by_hour_of_day"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は集計では意味を持たないため無視する。
+//
+// 集計は UTC 上の時刻 (`"00"`〜`"23"`) で行う。2 桁ゼロ詰めで lex 順 = 時間順を
+// 保つ（`processor-go`/`analytics-py` の `by_hour_of_day` と同じ規約）。
+// populated-only: 母集団 0 の時間帯は配列に含めない（既存 `by_day_of_week` /
+// 他 2 サービスの方針に揃える）。
+app.get("/api/users/by_hour_of_day", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/by_hour_of_day rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // UTC 時刻キー ("00"〜"23") → 件数。
+  // 壊れた `created_at` (パース不能) は安全側で集計対象外（既存 by_day_of_week と同じ）。
+  // 2 桁ゼロ詰めで lex 順 = 時間順を保つ（processor-go / analytics-py と同じ規約）。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const u of list) {
+    const ts = new Date(u.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const hour = ts.getUTCHours();
+    const key = hour.toString().padStart(2, "0");
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 時刻キーの lex 昇順 = 時間順 ("00" < "01" < ... < "23")。
+  // populated-only: 値が 0 の時刻は含めない（by_day_of_week と同じ）。
+  const byHourOfDay = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([hour, count]) => ({ hour, count }));
+
+  res.json({
+    total,
+    distinct_hours: byHourOfDay.length,
+    by_hour_of_day: byHourOfDay,
+  });
+});
+
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
