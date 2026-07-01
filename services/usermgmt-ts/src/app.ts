@@ -599,6 +599,72 @@ app.get("/api/users/by_hour_of_day", (req: Request, res: Response) => {
   });
 });
 
+// `/api/users/:id` より前に登録して、`:id == "by_day"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は集計では意味を持たないため無視する。
+//
+// バケットキーは UTC カレンダー日付（`YYYY-MM-DD`）。`toISOString().slice(0,10)`
+// で常に UTC の日付文字列を得られる。lex 昇順 = カレンダー昇順を保つため
+// ソートは自然順で足りる（`processor-go` / `analytics-py` の `by_day` と同じ規約）。
+// populated-only: 母集団 0 の日付は配列に含めない（既存 `by_day_of_week` /
+// `by_hour_of_day` と同じ方針）。3 サービスの時間軸集計の対称性を完成させる。
+app.get("/api/users/by_day", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/by_day rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // UTC 日付キー ("YYYY-MM-DD") → 件数。
+  // 壊れた `created_at` (パース不能) は安全側で集計対象外（既存の他集計と同じ）。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const u of list) {
+    const ts = new Date(u.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const key = ts.toISOString().slice(0, 10);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 日付キーの lex 昇順 = カレンダー昇順（"2026-06-30" < "2026-07-01"）。
+  // populated-only: 件数 0 の日付は含めない（by_day_of_week / by_hour_of_day と同じ）。
+  const byDay = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([day, count]) => ({ day, count }));
+
+  res.json({
+    total,
+    distinct_days: byDay.length,
+    by_day: byDay,
+  });
+});
+
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
