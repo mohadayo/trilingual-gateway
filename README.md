@@ -168,6 +168,10 @@ curl http://localhost:8002/api/stats
 | GET | `/health` | Health check |
 | POST | `/api/users` | Create a user |
 | GET | `/api/users` | List users with filtering / search / pagination / sorting (see params below) |
+| GET | `/api/users/count` | ユーザ件数集計（`role` / `q` / `since` / `until` フィルタと `by_role` 内訳を返す軽量エンドポイント） |
+| GET | `/api/users/by_day` | UTC カレンダー日 (`YYYY-MM-DD`) ごとのユーザ登録件数集計。populated-only で日付昇順 |
+| GET | `/api/users/by_hour_of_day` | UTC 時刻 (`00`〜`23`) ごとのユーザ登録件数集計 |
+| GET | `/api/users/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) ごとのユーザ登録件数集計 |
 | GET | `/api/users/:id` | Get user by ID |
 | PUT | `/api/users/:id` | Update a user (partial update) |
 | DELETE | `/api/users/:id` | Delete a user |
