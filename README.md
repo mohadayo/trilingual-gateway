@@ -253,13 +253,11 @@ trilingual-gateway/
 └── services/
     ├── analytics-py/          # Python analytics service
     │   ├── Dockerfile
-    │   ├── package.json
-    │   ├── tsconfig.json
-    │   ├── jest.config.js
-    │   ├── .eslintrc.json
-    │   └── src/
-    │       ├── app.ts
-    │       └── app.test.ts
+    │   ├── app.py
+    │   ├── requirements.txt
+    │   ├── requirements-dev.txt
+    │   ├── test_app.py
+    │   └── test_middleware.py
     ├── processor-go/          # Go message processor
     │   ├── Dockerfile
     │   ├── go.mod
