@@ -170,6 +170,7 @@ curl http://localhost:8002/api/stats
 | GET | `/api/users` | List users with filtering / search / pagination / sorting (see params below) |
 | GET | `/api/users/count` | ユーザ件数集計（`role` / `q` / `since` / `until` フィルタと `by_role` 内訳を返す軽量エンドポイント） |
 | GET | `/api/users/by_day` | UTC カレンダー日 (`YYYY-MM-DD`) ごとのユーザ登録件数集計。populated-only で日付昇順 |
+| GET | `/api/users/by_month` | UTC カレンダー月 (`YYYY-MM`) ごとのユーザ登録件数集計。日次より粗い月次トレンド用途、populated-only で月昇順 |
 | GET | `/api/users/by_hour_of_day` | UTC 時刻 (`00`〜`23`) ごとのユーザ登録件数集計 |
 | GET | `/api/users/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) ごとのユーザ登録件数集計 |
 | GET | `/api/users/:id` | Get user by ID |
@@ -185,7 +186,7 @@ curl http://localhost:8002/api/stats
 
 **Validation rules (POST / PUT):**
 - `username`: 必須（POSTのみ）、トリム後 1〜`MAX_USERNAME_LENGTH`（既定 50）文字
-- `email`: 必須（POSTのみ）、トリム後 1〜254 文字、簡易メール形式チェック、**小文字に正規化**して保存（大文字違いの重複を防止）
+- `email`: 必須（POSTのみ）、トリム後 1〜254 文字、簡易メール形式チェック、**小文字に正規化**して保存(大文字違いの重複を防止)
 - `role`: 任意、`user` / `admin` / `moderator` のいずれか（既定: `user`）
 - 不正な値は 400 を返す
 
@@ -254,7 +255,9 @@ trilingual-gateway/
     │   ├── Dockerfile
     │   ├── app.py
     │   ├── requirements.txt
-    │   └── test_app.py
+    │   ├── requirements-dev.txt
+    │   ├── test_app.py
+    │   └── test_middleware.py
     ├── processor-go/          # Go message processor
     │   ├── Dockerfile
     │   ├── go.mod
