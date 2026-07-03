@@ -363,7 +363,7 @@ def list_event_names():
             "allowed": sorted(ALLOWED_SORT_ORDERS),
         }), 400
 
-    # limit/offset を list_events と同じ規約で正規化する（負値→既定 / 上限クランプ）。
+    # limit/offset を list_events と同じ規約で正規化する(負値→既定 / 上限クランプ)。
     if limit < 0:
         limit = DEFAULT_PAGE_LIMIT
     if limit > MAX_PAGE_LIMIT:
@@ -477,7 +477,7 @@ def event_name_detail(name: str):
     first_seen = timestamps[0] if timestamps else None
     last_seen = timestamps[-1] if timestamps else None
 
-    # latest_properties は last_seen を持つレコードの properties（複数あれば最後に見たもの）。
+    # latest_properties は last_seen を持つレコードの properties(複数あれば最後に見たもの)。
     latest_properties: dict = {}
     if last_seen is not None:
         for e in matched:
@@ -485,8 +485,8 @@ def event_name_detail(name: str):
                 props = e.get("properties")
                 if isinstance(props, dict):
                     latest_properties = props
-                # 同一 timestamp の重複があれば後勝ち（FIFO 順で書き込まれているため、
-                # ループの最後に見るのが「実時間で最後の観測」になる）
+                # 同一 timestamp の重複があれば後勝ち(FIFO 順で書き込まれているため、
+                # ループの最後に見るのが「実時間で最後の観測」になる)
 
     # 全レコードの properties キーをユニオンしてソートして返す。
     keys: set[str] = set()
@@ -800,11 +800,11 @@ def list_property_values(key: str):
     reverse = sort_order == "desc"
     if sort_field == "count":
         # count 同値時は value 表示順を安定化するため secondary key として
-        # 値の文字列表現を使う（reverse の影響は受けない）。
+        # 値の文字列表現を使う(reverse の影響は受けない)。
         items.sort(key=lambda x: str(x["value"]))
         items.sort(key=lambda x: x["count"], reverse=reverse)
     else:
-        # 値の比較は型混在に弱いため文字列表現で行う（タイブレーカ用ではなく主キー）。
+        # 値の比較は型混在に弱いため文字列表現で行う(タイブレーカ用ではなく主キー)。
         items.sort(key=lambda x: str(x["value"]), reverse=reverse)
 
     total = len(items)
@@ -885,8 +885,8 @@ def events_by_day():
     counts: dict[str, int] = {}
     for event in filtered:
         # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
-        # 集計に含めない（`_filter_events_by_time` と同じ防御）。日付抽出も UTC へ
-        # 変換してから行い、日付境界での分裂を避ける（processor-go の by_day と同じ方針）。
+        # 集計に含めない(`_filter_events_by_time` と同じ防御)。日付抽出も UTC へ
+        # 変換してから行い、日付境界での分裂を避ける(processor-go の by_day と同じ方針)。
         raw_ts = event.get("timestamp")
         if not isinstance(raw_ts, str):
             continue
@@ -912,6 +912,87 @@ def events_by_day():
         "total": total,
         "distinct_days": len(by_day),
         "by_day": by_day,
+    })
+
+
+@app.route("/api/events/by_month", methods=["GET"])
+def events_by_month():
+    """フィルタ通過後のイベントを UTC 月 (YYYY-MM) でビニングし、
+    月昇順の時系列カウントを返す軽量集計エンドポイント。
+
+    `/api/events/by_day` が日単位の細かい推移を見るのに対し、本エンドポイントは
+    月次の長期トレンドを 1 リクエストで把握するためのより粗い粒度の集計。
+    `usermgmt-ts` 側の `/api/users/by_month` と同じ集計ポリシーで、母集団 0 の
+    月は省略する (populated-only)。
+    月キーは `YYYY-MM` の lex 昇順で固定(lex 順 = カレンダー順)。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ
+    - `q`: event_name の部分一致（大文字小文字無視）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on by_month: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on by_month: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on by_month: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    counts: dict[str, int] = {}
+    for event in filtered:
+        # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
+        # 集計に含めない(by_day と同じ防御)。月抽出も UTC 正規化後に行い、
+        # 月境界での分裂を避ける(by_day / usermgmt-ts の by_month と同じ方針)。
+        raw_ts = event.get("timestamp")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        month = dt.strftime("%Y-%m")
+        counts[month] = counts.get(month, 0) + 1
+
+    # ISO 月 (`YYYY-MM`) の lex 順はカレンダー昇順と一致するため、sorted で十分。
+    by_month = [{"month": m, "count": counts[m]} for m in sorted(counts.keys())]
+    total = sum(counts.values())
+    logger.info(
+        "by_month requested: total=%d distinct_months=%d (event_name=%s q=%s)",
+        total, len(by_month), event_name, q,
+    )
+    return jsonify({
+        "total": total,
+        "distinct_months": len(by_month),
+        "by_month": by_month,
     })
 
 
@@ -966,8 +1047,8 @@ def events_by_hour_of_day():
     counts: dict[str, int] = {}
     for event in filtered:
         # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
-        # 集計に含めない（`_filter_events_by_time` と同じ防御）。時刻抽出も UTC へ
-        # 変換してから行い、時刻境界での分裂を避ける（by_day と同じ方針）。
+        # 集計に含めない(`_filter_events_by_time` と同じ防御)。時刻抽出も UTC へ
+        # 変換してから行い、時刻境界での分裂を避ける(by_day と同じ方針)。
         raw_ts = event.get("timestamp")
         if not isinstance(raw_ts, str):
             continue
@@ -1049,7 +1130,7 @@ def events_by_day_of_week():
     counts: dict[str, int] = {}
     for event in filtered:
         # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
-        # 集計に含めない（by_hour_of_day と同じ防御）。曜日抽出も UTC 正規化後に
+        # 集計に含めない(by_hour_of_day と同じ防御)。曜日抽出も UTC 正規化後に
         # 行い、tz 越境で曜日が変わるケースに耐える。
         raw_ts = event.get("timestamp")
         if not isinstance(raw_ts, str):
