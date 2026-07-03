@@ -508,6 +508,119 @@ def test_events_by_day_blank_q_returns_400(client):
     assert resp.status_code == 400
 
 
+# ---- GET /api/events/by_month ----
+
+
+def test_events_by_month_empty_store_returns_empty(client):
+    resp = client.get("/api/events/by_month")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_months": 0, "by_month": []}
+
+
+def test_events_by_month_groups_by_utc_month(client):
+    _seed_event_at("login", "2026-06-01T00:00:00+00:00")
+    _seed_event_at("login", "2026-06-30T23:59:59+00:00")
+    _seed_event_at("login", "2026-07-01T00:00:00+00:00")
+    resp = client.get("/api/events/by_month")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 3
+    assert body["distinct_months"] == 2
+    assert body["by_month"] == [
+        {"month": "2026-06", "count": 2},
+        {"month": "2026-07", "count": 1},
+    ]
+
+
+def test_events_by_month_sorted_lex_ascending(client):
+    _seed_event_at("a", "2026-08-05T00:00:00+00:00")
+    _seed_event_at("a", "2026-01-05T00:00:00+00:00")
+    _seed_event_at("a", "2026-04-05T00:00:00+00:00")
+    resp = client.get("/api/events/by_month")
+    months = [row["month"] for row in resp.get_json()["by_month"]]
+    assert months == ["2026-01", "2026-04", "2026-08"]
+
+
+def test_events_by_month_filters_by_event_name(client):
+    _seed_event_at("login", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("logout", "2026-06-20T11:00:00+00:00")
+    _seed_event_at("login", "2026-07-20T10:00:00+00:00")
+    resp = client.get("/api/events/by_month?event_name=login")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_month"] == [
+        {"month": "2026-06", "count": 1},
+        {"month": "2026-07", "count": 1},
+    ]
+
+
+def test_events_by_month_filters_by_q_case_insensitive(client):
+    _seed_event_at("UserSignup", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("user_login", "2026-06-20T11:00:00+00:00")
+    _seed_event_at("page_view", "2026-07-20T10:00:00+00:00")
+    resp = client.get("/api/events/by_month?q=USER")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_months"] == 1
+
+
+def test_events_by_month_filters_by_since_until(client):
+    _seed_event_at("e", "2026-05-01T00:00:00+00:00")
+    _seed_event_at("e", "2026-06-01T00:00:00+00:00")
+    _seed_event_at("e", "2026-07-01T00:00:00+00:00")
+    _seed_event_at("e", "2026-08-01T00:00:00+00:00")
+    resp = client.get(
+        "/api/events/by_month?since=2026-06-01T00:00:00Z&until=2026-07-31T23:59:59Z"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_month"] == [
+        {"month": "2026-06", "count": 1},
+        {"month": "2026-07", "count": 1},
+    ]
+
+
+def test_events_by_month_converts_non_utc_timestamps_to_utc(client):
+    # JST 2026-07-01 08:00 → UTC 2026-06-30 23:00（前月になる）
+    _seed_event_at("evt", "2026-07-01T08:00:00+09:00")
+    # JST 2026-07-01 10:00 → UTC 2026-07-01 01:00（同月）
+    _seed_event_at("evt", "2026-07-01T10:00:00+09:00")
+    resp = client.get("/api/events/by_month")
+    body = resp.get_json()
+    assert body["distinct_months"] == 2
+    months = {row["month"]: row["count"] for row in body["by_month"]}
+    assert months == {"2026-06": 1, "2026-07": 1}
+
+
+def test_events_by_month_ignores_broken_timestamps(client):
+    _seed_event_at("good", "2026-06-20T10:00:00+00:00")
+    _seed_event_at("bad_iso", "not-a-timestamp")
+    events_store.append({"event_name": "missing_ts", "properties": {}})
+    resp = client.get("/api/events/by_month")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_month"] == [{"month": "2026-06", "count": 1}]
+
+
+def test_events_by_month_invalid_since_returns_400(client):
+    resp = client.get("/api/events/by_month?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_events_by_month_since_greater_than_until_returns_400(client):
+    resp = client.get(
+        "/api/events/by_month?since=2026-08-01T00:00:00Z&until=2026-06-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_events_by_month_blank_q_returns_400(client):
+    resp = client.get("/api/events/by_month?q=%20%20%20")
+    assert resp.status_code == 400
+
+
 # ---- GET /api/events/by_hour_of_day ----
 
 
