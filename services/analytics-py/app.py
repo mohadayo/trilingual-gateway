@@ -996,6 +996,93 @@ def events_by_month():
     })
 
 
+@app.route("/api/events/by_week", methods=["GET"])
+def events_by_week():
+    """フィルタ通過後のイベントを ISO 8601 週 (`YYYY-Www`) でビニングし、
+    週昇順の時系列カウントを返す軽量集計エンドポイント。
+
+    `/api/events/by_day` は日単位で細かすぎ、`/api/events/by_month` は月単位で
+    粗すぎるという中間粒度を埋める。運用系ダッシュボードで多い「直近 8〜12 週の
+    週次推移」を 1 リクエストで取得できる。既存 `by_day` / `by_month` と同じ
+    populated-only 方針で、母集団 0 の週は省略する。
+
+    週キーは ISO 8601 の週年・週番号を `YYYY-Www` (例: `2026-W26`) の 8 文字
+    文字列で返す。ISO 週年は暦年と一致しないケースがある (12 月末が翌年の第 1 週
+    に、1 月頭が前年の最終週になる) ため、`dt.isocalendar()` の `year` / `week` を
+    使用する。週番号は 2 桁ゼロ詰めなので lex 昇順 = カレンダー昇順になる。
+
+    クエリ:
+    - `event_name`: 完全一致フィルタ
+    - `q`: event_name の部分一致（大文字小文字無視）
+    - `since` / `until`: ISO8601 タイムスタンプ範囲フィルタ
+    """
+    event_name = request.args.get("event_name")
+    q_raw = request.args.get("q")
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+
+    q, q_err = _normalize_q(q_raw)
+    if q_err is not None:
+        logger.warning("Invalid q filter on by_week: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since = None
+    until = None
+    try:
+        if since_raw is not None:
+            since = _parse_iso_datetime(since_raw, "since")
+        if until_raw is not None:
+            until = _parse_iso_datetime(until_raw, "until")
+    except ValueError as exc:
+        logger.warning("Invalid timestamp filter on by_week: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+
+    if since is not None and until is not None and since > until:
+        logger.warning("Invalid range on by_week: since=%s > until=%s", since, until)
+        return jsonify({"error": "'since' must be less than or equal to 'until'"}), 400
+
+    with events_lock:
+        filtered = list(events_store)
+    if event_name:
+        filtered = [e for e in filtered if e["event_name"] == event_name]
+    filtered = _filter_events_by_q(filtered, q)
+    filtered = _filter_events_by_time(filtered, since, until)
+
+    counts: dict[str, int] = {}
+    for event in filtered:
+        # POST 時に UTC ISO8601 で書き込まれている前提だが、壊れた timestamp は
+        # 集計に含めない(by_day / by_month と同じ防御)。週抽出も UTC 正規化後に
+        # 行い、tz 越境で ISO 週が変わるケースに耐える。
+        raw_ts = event.get("timestamp")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        iso_year, iso_week, _ = dt.isocalendar()
+        # 週番号は 2 桁ゼロ詰めで `YYYY-Www` にする (lex 昇順 = カレンダー昇順)。
+        week_key = f"{iso_year:04d}-W{iso_week:02d}"
+        counts[week_key] = counts.get(week_key, 0) + 1
+
+    # `YYYY-Www` の lex 順は ISO 週年・週番号順と一致するため sorted で十分。
+    by_week = [{"week": w, "count": counts[w]} for w in sorted(counts.keys())]
+    total = sum(counts.values())
+    logger.info(
+        "by_week requested: total=%d distinct_weeks=%d (event_name=%s q=%s)",
+        total, len(by_week), event_name, q,
+    )
+    return jsonify({
+        "total": total,
+        "distinct_weeks": len(by_week),
+        "by_week": by_week,
+    })
+
+
 @app.route("/api/events/by_hour_of_day", methods=["GET"])
 def events_by_hour_of_day():
     """フィルタ通過後のイベントを UTC の時刻 (`"00"`〜`"23"`) でビニングし、
