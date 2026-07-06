@@ -621,6 +621,142 @@ def test_events_by_month_blank_q_returns_400(client):
     assert resp.status_code == 400
 
 
+# ---- GET /api/events/by_week ----
+
+
+def test_events_by_week_empty_store_returns_empty(client):
+    resp = client.get("/api/events/by_week")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_weeks": 0, "by_week": []}
+
+
+def test_events_by_week_groups_by_iso_week(client):
+    # 2026-06-22 月曜 (ISO 週 26)
+    _seed_event_at("login", "2026-06-22T10:00:00+00:00")
+    # 2026-06-28 日曜 (ISO 週 26 の最終日)
+    _seed_event_at("login", "2026-06-28T23:59:59+00:00")
+    # 2026-06-29 月曜 (ISO 週 27)
+    _seed_event_at("login", "2026-06-29T00:00:00+00:00")
+    resp = client.get("/api/events/by_week")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 3
+    assert body["distinct_weeks"] == 2
+    assert body["by_week"] == [
+        {"week": "2026-W26", "count": 2},
+        {"week": "2026-W27", "count": 1},
+    ]
+
+
+def test_events_by_week_sorted_lex_ascending(client):
+    _seed_event_at("a", "2026-06-29T05:00:00+00:00")  # W27
+    _seed_event_at("a", "2026-06-01T05:00:00+00:00")  # W23
+    _seed_event_at("a", "2026-06-15T05:00:00+00:00")  # W25
+    resp = client.get("/api/events/by_week")
+    weeks = [row["week"] for row in resp.get_json()["by_week"]]
+    assert weeks == ["2026-W23", "2026-W25", "2026-W27"]
+
+
+def test_events_by_week_handles_iso_year_boundary(client):
+    # ISO 週年は暦年と一致しない: 2026-12-31 (木) は 2026-W53 (グレゴリオ 2026年)、
+    # 2027-01-04 (月) は 2027-W01。この境界で週キーが正しく切り替わることを確認。
+    _seed_event_at("evt", "2026-12-31T00:00:00+00:00")
+    _seed_event_at("evt", "2027-01-04T00:00:00+00:00")
+    resp = client.get("/api/events/by_week")
+    body = resp.get_json()
+    weeks = {row["week"]: row["count"] for row in body["by_week"]}
+    assert weeks == {"2026-W53": 1, "2027-W01": 1}
+
+
+def test_events_by_week_iso_year_can_differ_from_gregorian_year(client):
+    # 2026-01-01 (木) は ISO 週年で 2026-W01 (2025 年内に含まれない例)
+    _seed_event_at("evt", "2026-01-01T00:00:00+00:00")
+    resp = client.get("/api/events/by_week")
+    body = resp.get_json()
+    assert body["by_week"] == [{"week": "2026-W01", "count": 1}]
+
+
+def test_events_by_week_filters_by_event_name(client):
+    _seed_event_at("login", "2026-06-22T10:00:00+00:00")   # W26
+    _seed_event_at("logout", "2026-06-22T11:00:00+00:00")  # W26
+    _seed_event_at("login", "2026-06-29T10:00:00+00:00")   # W27
+    resp = client.get("/api/events/by_week?event_name=login")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_week"] == [
+        {"week": "2026-W26", "count": 1},
+        {"week": "2026-W27", "count": 1},
+    ]
+
+
+def test_events_by_week_filters_by_q_case_insensitive(client):
+    _seed_event_at("UserSignup", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("user_login", "2026-06-22T11:00:00+00:00")
+    _seed_event_at("page_view", "2026-06-29T10:00:00+00:00")
+    resp = client.get("/api/events/by_week?q=USER")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["distinct_weeks"] == 1
+    assert body["by_week"] == [{"week": "2026-W26", "count": 2}]
+
+
+def test_events_by_week_filters_by_since_until(client):
+    _seed_event_at("e", "2026-06-15T00:00:00+00:00")  # W25
+    _seed_event_at("e", "2026-06-22T00:00:00+00:00")  # W26
+    _seed_event_at("e", "2026-06-29T00:00:00+00:00")  # W27
+    _seed_event_at("e", "2026-07-06T00:00:00+00:00")  # W28
+    resp = client.get(
+        "/api/events/by_week?since=2026-06-22T00:00:00Z&until=2026-06-29T23:59:59Z"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["by_week"] == [
+        {"week": "2026-W26", "count": 1},
+        {"week": "2026-W27", "count": 1},
+    ]
+
+
+def test_events_by_week_converts_non_utc_timestamps_to_utc(client):
+    # JST 2026-06-29 08:00 → UTC 2026-06-28 23:00 (日曜, ISO 週 26)
+    _seed_event_at("evt", "2026-06-29T08:00:00+09:00")
+    # JST 2026-06-29 09:00 → UTC 2026-06-29 00:00 (月曜, ISO 週 27)
+    _seed_event_at("evt", "2026-06-29T09:00:00+09:00")
+    resp = client.get("/api/events/by_week")
+    body = resp.get_json()
+    assert body["distinct_weeks"] == 2
+    weeks = {row["week"]: row["count"] for row in body["by_week"]}
+    assert weeks == {"2026-W26": 1, "2026-W27": 1}
+
+
+def test_events_by_week_ignores_broken_timestamps(client):
+    _seed_event_at("good", "2026-06-22T10:00:00+00:00")
+    _seed_event_at("bad_iso", "not-a-timestamp")
+    events_store.append({"event_name": "missing_ts", "properties": {}})
+    resp = client.get("/api/events/by_week")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_week"] == [{"week": "2026-W26", "count": 1}]
+
+
+def test_events_by_week_invalid_since_returns_400(client):
+    resp = client.get("/api/events/by_week?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_events_by_week_since_greater_than_until_returns_400(client):
+    resp = client.get(
+        "/api/events/by_week?since=2026-06-29T00:00:00Z&until=2026-06-22T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_events_by_week_blank_q_returns_400(client):
+    resp = client.get("/api/events/by_week?q=%20%20%20")
+    assert resp.status_code == 400
+
+
 # ---- GET /api/events/by_hour_of_day ----
 
 
