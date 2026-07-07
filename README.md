@@ -171,6 +171,7 @@ curl http://localhost:8002/api/stats
 | GET | `/api/users/count` | ユーザ件数集計（`role` / `q` / `since` / `until` フィルタと `by_role` 内訳を返す軽量エンドポイント） |
 | GET | `/api/users/by_day` | UTC カレンダー日 (`YYYY-MM-DD`) ごとのユーザ登録件数集計。populated-only で日付昇順 |
 | GET | `/api/users/by_month` | UTC カレンダー月 (`YYYY-MM`) ごとのユーザ登録件数集計。日次より粗い月次トレンド用途、populated-only で月昇順 |
+| GET | `/api/users/by_week` | ISO 8601 週 (`YYYY-Www`) ごとのユーザ登録件数集計。日次と月次の中間解像度、四半期・半期スパンの登録推移用途、populated-only で週昇順 |
 | GET | `/api/users/by_hour_of_day` | UTC 時刻 (`00`〜`23`) ごとのユーザ登録件数集計 |
 | GET | `/api/users/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) ごとのユーザ登録件数集計 |
 | GET | `/api/users/:id` | Get user by ID |
