@@ -732,6 +732,104 @@ app.get("/api/users/by_month", (req: Request, res: Response) => {
   });
 });
 
+// ISO 8601 週番号を「YYYY-Www」形式で返すヘルパ。木曜合わせアルゴリズム:
+//   1. その日の週の木曜を求める（月曜起点、木曜が属する年 = ISO 週年）
+//   2. その年 1/1 の木曜と何日離れているかで週番号を計算
+// `Intl.DateTimeFormat` や `Date.toLocaleString` はランタイム / ロケール依存で
+// ISO 週を返さないため、`Date.getUTCDay()` ベースで純関数として計算する。
+// 入力 `Date` は既に UTC 側の値で渡す前提（呼び元で `new Date(iso).toISOString()`
+// 経由するため、UTC 正規化は行われている）。
+function toIsoWeekString(date: Date): string {
+  // Copy in UTC space so mutations don't leak into the caller.
+  const d = new Date(
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+    ),
+  );
+  // ISO 週規則: 1 (月) 〜 7 (日)。 `getUTCDay()` は 0 (日) 〜 6 (土) を返すので変換。
+  const dayNum = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+  // その週の木曜へシフト（4 - dayNum 日分ずらす）。木曜が属する年が ISO 週年。
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const isoYear = d.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  // 週番号 = ((その日 - 年始) / 7 日) + 1
+  const weekNo = Math.ceil(
+    ((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7,
+  );
+  const weekStr = weekNo < 10 ? `0${weekNo}` : `${weekNo}`;
+  return `${isoYear}-W${weekStr}`;
+}
+
+// `/api/users/:id` より前に登録して、`:id == "by_week"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は集計では意味を持たないため無視する。
+//
+// バケットキーは ISO 週 (`YYYY-Www`、例 `"2026-W27"`)。`toIsoWeekString` で
+// UTC 正規化済みの Date から ISO 8601 週規則（月曜起点・木曜合わせ）で計算する。
+// lex 昇順 = カレンダー週昇順を保つため（"2026-W01" < "2026-W53"）、追加のソート
+// キー変換は不要。populated-only: 母集団 0 の週は配列に含めない（既存 `by_day` /
+// `by_month` / `by_hour_of_day` / `by_day_of_week` と同じ方針）。日次より粗く、
+// 月次より細かい中間解像度で、四半期・半期スパンの登録推移を 1 リクエストで
+// 把握するための集計。
+app.get("/api/users/by_week", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/by_week rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // ISO 週キー ("YYYY-Www") → 件数。
+  // 壊れた `created_at` (パース不能) は安全側で集計対象外（既存の他集計と同じ）。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const u of list) {
+    const ts = new Date(u.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const key = toIsoWeekString(ts);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 週キーの lex 昇順 = カレンダー昇順（"2026-W01" < "2026-W53"）。
+  // populated-only: 件数 0 の週は含めない（by_day / by_month と同じ）。
+  const byWeek = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([week, count]) => ({ week, count }));
+
+  res.json({
+    total,
+    distinct_weeks: byWeek.length,
+    by_week: byWeek,
+  });
+});
+
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
@@ -790,7 +888,7 @@ app.delete("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   res.status(204).send();
 });
 
-export { app, users, MAX_REQUEST_BODY };
+export { app, users, MAX_REQUEST_BODY, toIsoWeekString };
 
 if (require.main === module) {
   const port = process.env.USERMGMT_PORT || 8003;
