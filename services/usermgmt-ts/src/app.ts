@@ -830,6 +830,89 @@ app.get("/api/users/by_week", (req: Request, res: Response) => {
   });
 });
 
+// email の `@` 以降を取り出して小文字化したドメイン文字列を返す。
+// `@` を含まない不正 email や、`@` が末尾にあるだけの email (`foo@`) は null。
+// バリデーション時に `EMAIL_REGEX` を通過している前提だが、破損保険として null を許す。
+function extractEmailDomain(email: string): string | null {
+  const idx = email.lastIndexOf("@");
+  if (idx < 0 || idx === email.length - 1) {
+    return null;
+  }
+  const domain = email.slice(idx + 1).trim();
+  if (domain.length === 0) {
+    return null;
+  }
+  return domain.toLowerCase();
+}
+
+// `/api/users/:id` より前に登録して、`:id == "by_domain"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は集計では意味を持たないため無視する。
+//
+// バケットキーは `email` の `@` 以降を小文字化したドメイン文字列。
+// バリデーション時に `EMAIL_REGEX` と `toLowerCase()` を通過している前提だが、
+// 破損保険として `extractEmailDomain` は null を返すことがあり、その場合は集計対象外。
+// lex 昇順（domain 文字列の自然順）で返す。UI 側で count 降順が必要なら
+// クライアント再ソートで対応（他 `by_*` と応答形状を揃えるため）。
+// populated-only: 母集団 0 のドメインは含めない（他 `by_*` と同じ方針）。
+//
+// B2B SaaS のワークスペース単位の採用トラッキング、企業ドメインごとの分布把握、
+// `example.com` などのテストドメイン混入検知などに使う。
+app.get("/api/users/by_domain", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/by_domain rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // ドメインキー → 件数。extractEmailDomain が null のレコードは集計対象外。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const u of list) {
+    const domain = extractEmailDomain(u.email);
+    if (domain === null) continue;
+    counts.set(domain, (counts.get(domain) ?? 0) + 1);
+    total += 1;
+  }
+
+  // ドメインキーの lex 昇順（自然順）。UI 側で count 降順が必要ならクライアント再ソート。
+  // populated-only: 件数 0 のドメインは含めない（他 by_* と同じ）。
+  const byDomain = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([domain, count]) => ({ domain, count }));
+
+  res.json({
+    total,
+    distinct_domains: byDomain.length,
+    by_domain: byDomain,
+  });
+});
+
 app.get("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   const user = users.get(req.params.id);
   if (!user) {
@@ -888,7 +971,7 @@ app.delete("/api/users/:id", (req: Request<{ id: string }>, res: Response) => {
   res.status(204).send();
 });
 
-export { app, users, MAX_REQUEST_BODY, toIsoWeekString };
+export { app, users, MAX_REQUEST_BODY, toIsoWeekString, extractEmailDomain };
 
 if (require.main === module) {
   const port = process.env.USERMGMT_PORT || 8003;
