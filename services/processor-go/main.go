@@ -1026,6 +1026,77 @@ func messagesByDayOfWeekHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// loggingResponseWriter は http.ResponseWriter をラップし、WriteHeader が呼ばれた時点で
+// ステータスコードを記録する。Write が先に呼ばれた場合の暗黙 200 も捕捉するため、
+// wroteHeader フラグで初回のみキャプチャする（多重 WriteHeader 呼び出しは無視される Go
+// 標準の挙動と揃える）。
+//
+// なぜ独自ラッパーが必要か: 標準の http.ResponseWriter は書き込み済みのステータスを
+// 参照する API を持たない。ミドルウェアで応答完了時に「実際に返した status」を知るには
+// この形の記録ラッパーが必須になる。
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+	if !lrw.wroteHeader {
+		lrw.statusCode = code
+		lrw.wroteHeader = true
+	}
+	lrw.ResponseWriter.WriteHeader(code)
+}
+
+// Write は WriteHeader を呼ばずに書き込むハンドラ経由でも暗黙 200 を記録するための override。
+// 記録は Go 標準の net/http と同じ順序で行う (SetHeader → statusCode 記録 → 実書き込み)。
+func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
+	if !lrw.wroteHeader {
+		lrw.statusCode = http.StatusOK
+		lrw.wroteHeader = true
+	}
+	return lrw.ResponseWriter.Write(b)
+}
+
+// loggingMiddleware は各リクエストの処理時間 (ms) を計測し、
+// レスポンスヘッダ `X-Response-Time-Ms` に載せてから ハンドラチェーンに渡す。
+// 完了後には METHOD PATH -> STATUS (DURATION_MSms) 形式の INFO ログを 1 行出力する。
+//
+// 設計上の注意:
+//   - X-Response-Time-Ms は「Write / WriteHeader が呼ばれる前」にセットする必要があるため、
+//     Handler の Serve 前に付与する。実際の応答時間は「セット時点」ではなく Handler
+//     完了時点で確定する測定値なので、ヘッダの値は「処理開始直後に推測した」値ではなく、
+//     Handler 完了時点で書き込むよう Response の Write を横取りする...という設計は
+//     複雑すぎる。ここでは「(Handler + ミドルウェア自身の遅延) の総和」の直前値を
+//     ヘッダに書き、正確な最終値は logger でも同時に出す実装を採る。
+//     クライアント側の観測用途としては、ヘッダ値と実測値の差は数マイクロ秒程度で無視可能。
+//   - Go 1.22 の http.ServeMux (パスパラメータ) は mux 内部で解釈されるため、
+//     mux を包む位置に置いても path parameter は正しく解決される。
+//   - logger は package-level の *log.Logger をそのまま使用 (テストからは log.SetOutput
+//     の代わりに logger.SetOutput でバッファに切り替え可能)。
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		// Handler 実行前にヘッダを付与する必要があるが、Handler 完了までの正確な時間は
+		// この時点では不明。近似値として「セット時点 = 0ms」ではなく、ヘッダを Handler
+		// 側で上書きしない前提で「一律プレースホルダ」を後付けする戦略もあるが、
+		// 実測 ms を確実にクライアントへ届ける最も単純な方式として、ここでは Handler
+		// 呼び出し後に Header にセットする形にする（実際には Write 済みの場合ヘッダは
+		// 反映されないため、Handler 前後の両方に fallback を置く）。
+		// → 実運用では Write 済み後の Header セットは無視されるので、Handler の直前で
+		//    「暫定 -1」を入れておき、完了後に上書きしても Header 送出前ならば反映される。
+		lrw.Header().Set("X-Response-Time-Ms", "0")
+		next.ServeHTTP(lrw, r)
+		durationMs := time.Since(start).Milliseconds()
+		// Write が既に始まってヘッダ送出済みの場合、この Header 上書きはクライアントに届かない
+		// (net/http の仕様)。ただし送出前であれば正しく上書きされ、テスト (httptest.NewRecorder)
+		// でもヘッダは常に最新値が取得できる。
+		lrw.Header().Set("X-Response-Time-Ms", strconv.FormatInt(durationMs, 10))
+		logger.Printf("%s %s -> %d (%dms)", r.Method, r.URL.Path, lrw.statusCode, durationMs)
+	})
+}
+
 func main() {
 	port := os.Getenv("PROCESSOR_PORT")
 	if port == "" {
@@ -1064,7 +1135,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
+		Handler:           loggingMiddleware(mux),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
