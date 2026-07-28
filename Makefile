@@ -1,4 +1,4 @@
-.PHONY: test test-python test-go test-ts up down build lint
+.PHONY: test test-python test-go test-ts up down build lint logs ps
 
 test: test-python test-go test-ts
 	@echo "All tests passed."
@@ -13,7 +13,7 @@ test-ts:
 	cd services/usermgmt-ts && npm install && npm test
 
 lint:
-	cd services/analytics-py && pip install -q -r requirements-dev.txt && flake8 --max-line-length=120 app.py test_app.py
+	cd services/analytics-py && pip install -q -r requirements-dev.txt && flake8 --max-line-length=120 --exclude=__pycache__ .
 	cd services/processor-go && go vet ./...
 	cd services/usermgmt-ts && npm install && npx eslint src/
 
