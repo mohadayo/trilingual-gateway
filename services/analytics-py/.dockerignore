@@ -1,0 +1,46 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distributions / build artifacts
+build/
+dist/
+*.egg
+
+# Tests and dev-only files (not needed in the runtime image)
+test_*.py
+*_test.py
+tests/
+requirements-dev.txt
+
+# VCS / editor / OS metadata
+.git/
+.gitignore
+.gitattributes
+.editorconfig
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docs and env files (may contain secrets / not needed at runtime)
+*.md
+.env
+.env.*
+!.env.example
+
+# Docker files themselves
+Dockerfile
+.dockerignore
