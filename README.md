@@ -69,9 +69,16 @@ make lint          # Run all linters
 | GET | `/api/events` | List events with filtering / pagination / sorting (see params below) |
 | DELETE | `/api/events` | Delete events by name (`?event_name=` required) |
 | GET | `/api/events/summary` | Aggregated event counts by name (filterable) |
+| GET | `/api/events/count` | フィルタ後の件数のみを返す軽量エンドポイント（`total` / `distinct_names` / `by_name`）。UI のバッジ表示・ページャ初期化用途で `/summary` より応答が小さい |
 | GET | `/api/events/names` | distinct な event_name のみを返す軽量エンドポイント（フィルタドロップダウン / オートコンプリート用） |
+| GET | `/api/events/names/<name>` | 単一 event_name の詳細ドリルダウン。`count` / `first_seen` / `last_seen` / `latest_properties` / `distinct_property_keys` を 1 リクエストで返す。0 件なら 404 |
 | GET | `/api/events/property_keys` | フィルタ後のイベントに登場した properties キー一覧（`event_name` / `q` / `since` / `until` / `order` / `limit` / `offset`） |
 | GET | `/api/events/property_values/<key>` | 指定キーの distinct 値とその出現回数（`event_name` / `q` / `since` / `until` / `sort=value\|count` / `order` / `limit` / `offset`、既定は `count desc`） |
+| GET | `/api/events/by_day` | UTC 日付 (`YYYY-MM-DD`) 別の時系列カウント。populated-only で日付昇順 |
+| GET | `/api/events/by_week` | ISO 8601 週 (`YYYY-Www`) 別の時系列カウント。日次より粗く月次より細かい中間解像度、populated-only で週昇順 |
+| GET | `/api/events/by_month` | UTC 月 (`YYYY-MM`) 別の時系列カウント。長期トレンド用途、populated-only で月昇順 |
+| GET | `/api/events/by_hour_of_day` | UTC 時刻 (`00`〜`23`) 別の周期分布。1 日内の流量集中を把握、populated-only で時間順 |
+| GET | `/api/events/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) 別の周期分布。平日 vs 週末の傾向把握、populated-only で曜日順 |
 
 **`GET /api/events` query parameters:**
 - `event_name`: 完全一致でイベント名を絞り込み
@@ -82,11 +89,17 @@ make lint          # Run all linters
 
 **`GET /api/events/summary` query parameters:** `event_name` / `since` / `until`（`/api/events` と同じ意味）
 
+**`GET /api/events/count` query parameters:** `event_name` / `q` / `since` / `until`（`/api/events` と同じ意味）
+
 **`GET /api/events/names` query parameters:**
 - `q`: event_name の大文字小文字無視部分一致
 - `since` / `until`: ISO 8601 タイムスタンプ範囲フィルタ（`/api/events` と同じパース）
 - `order`: `asc`（既定）/ `desc`（event_name 名昇順 / 降順）
 - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
+
+**`GET /api/events/names/<name>` query parameters:** `since` / `until`（`/api/events` と同じ意味）
+
+**`GET /api/events/by_day` / `by_week` / `by_month` / `by_hour_of_day` / `by_day_of_week` query parameters:** `event_name` / `q` / `since` / `until`（`/api/events` と同じ意味）
 
 **Example:**
 ```bash
@@ -104,6 +117,11 @@ curl http://localhost:8001/api/events/summary
 # Get distinct event_name list (light-weight)
 curl http://localhost:8001/api/events/names
 curl "http://localhost:8001/api/events/names?q=page&order=desc"
+
+# Daily / weekly / monthly trend
+curl http://localhost:8001/api/events/by_day
+curl http://localhost:8001/api/events/by_week
+curl http://localhost:8001/api/events/by_month
 ```
 
 ### Processor Service (`:8002`)
@@ -113,10 +131,14 @@ curl "http://localhost:8001/api/events/names?q=page&order=desc"
 | GET | `/health` | Health check |
 | POST | `/api/messages` | Publish a message to a channel |
 | GET | `/api/messages` | List messages with filtering / pagination / sorting (see params below) |
+| GET | `/api/messages/channels` | distinct な channel 名一覧を返す軽量エンドポイント（ドロップダウン populate 用途）。`q` / `since` / `until` / `order` / `limit` / `offset` を受け付ける |
+| GET | `/api/messages/by_day` | UTC 日付 (`YYYY-MM-DD`) 別の時系列カウント。populated-only で日付昇順 |
+| GET | `/api/messages/by_hour_of_day` | UTC 時刻 (`00`〜`23`) 別の周期分布。1 日内の流量集中を把握、populated-only で時間順 |
+| GET | `/api/messages/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) 別の周期分布。曜日別キャパシティプランニング用途、populated-only で曜日順 |
 | GET | `/api/messages/{id}` | Get a single message by ID（該当なしは `404`） |
 | DELETE | `/api/messages` | `channel` / `since` / `before` の AND で一致するメッセージを削除（少なくとも 1 フィルタ必須。`since` は包含、`before` は排他で半開区間 `[since, before)` を表現） |
 | DELETE | `/api/messages/{id}` | 単一メッセージを ID 指定で削除。レスポンスに削除前のメッセージ内容を含め、別 GET なしで監査ログに残せる。該当なしは `404` |
-| GET | `/api/stats` | Message count per channel（`?channel=` / `?q=` / `?since=` / `?until=` でフィルタ後の集計を返す） |
+| GET | `/api/stats` | Message count per channel（`?channel=` / `?q=` / `?since=` / `?until=` / `?top_channels_limit=` でフィルタ後の集計を返す） |
 
 **`GET /api/messages` query parameters:**
 - `channel`: 完全一致でチャンネルを絞り込み
@@ -126,7 +148,14 @@ curl "http://localhost:8001/api/events/names?q=page&order=desc"
 - `sort`: `created_at`（既定）/ `channel` / `id`
 - `order`: `asc`（既定）/ `desc`
 
-**`GET /api/stats` query parameters:** `channel` / `q` / `since` / `until` を `/api/messages` と同じセマンティクスで受け付け、フィルタ後のメッセージから集計値を返す。GET 以外のメソッドは 405。
+**`GET /api/messages/channels` query parameters:**
+- `channel` / `q` / `since` / `until`: `/api/messages` と同じセマンティクスでフィルタ後の distinct を取る
+- `order`: `asc`（既定）/ `desc`（channel 名昇順 / 降順）
+- `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
+
+**`GET /api/messages/by_day` / `by_hour_of_day` / `by_day_of_week` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）
+
+**`GET /api/stats` query parameters:** `channel` / `q` / `since` / `until` を `/api/messages` と同じセマンティクスで受け付け、フィルタ後のメッセージから集計値を返す。`top_channels_limit` (既定 `5`、上限 `100`) で `top_channels` の件数を制御できる。GET 以外のメソッドは 405。
 
 レスポンス形：
 
@@ -136,12 +165,17 @@ curl "http://localhost:8001/api/events/names?q=page&order=desc"
   "channels": {"alerts": 9, "info": 3},
   "distinct_channels": 2,
   "oldest": "2030-01-01T00:00:00Z",
-  "newest": "2030-12-31T23:59:59Z"
+  "newest": "2030-12-31T23:59:59Z",
+  "top_channels": [
+    {"channel": "alerts", "count": 9},
+    {"channel": "info", "count": 3}
+  ]
 }
 ```
 
 - `distinct_channels`: フィルタ通過後に登場した channel のユニーク数（`channels` マップのキー数と一致）
 - `oldest` / `newest`: フィルタ通過後の `created_at` の最小・最大（RFC 3339）。マッチ 0 件のときは両方とも `null`。クライアントが追加クエリ無しに「いまフィルタ条件で残っているデータの時間範囲」を把握できる
+- `top_channels`: `count` 降順（同数はチャネル名昇順）で先頭 `top_channels_limit` 件。`channels` マップから UI 側で再計算せず、そのまま「上位 N チャネル」バーチャートに使える
 
 集計は 1 スキャンで行うため、フィルタが付いても挙動コストは従来と変わらない。
 
@@ -159,6 +193,12 @@ curl -X POST http://localhost:8002/api/messages \
 
 # Get stats
 curl http://localhost:8002/api/stats
+
+# Distinct channels for a dropdown
+curl http://localhost:8002/api/messages/channels
+
+# Daily trend
+curl http://localhost:8002/api/messages/by_day
 ```
 
 ### User Management Service (`:8003`)
@@ -174,6 +214,7 @@ curl http://localhost:8002/api/stats
 | GET | `/api/users/by_week` | ISO 8601 週 (`YYYY-Www`) ごとのユーザ登録件数集計。日次と月次の中間解像度、四半期・半期スパンの登録推移用途、populated-only で週昇順 |
 | GET | `/api/users/by_hour_of_day` | UTC 時刻 (`00`〜`23`) ごとのユーザ登録件数集計 |
 | GET | `/api/users/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) ごとのユーザ登録件数集計 |
+| GET | `/api/users/by_domain` | email の `@` 以降を小文字化したドメイン別のユーザ件数集計。B2B SaaS のワークスペース単位採用トラッキング / テストドメイン混入検知に使う。populated-only でドメイン名昇順 |
 | GET | `/api/users/:id` | Get user by ID |
 | PUT | `/api/users/:id` | Update a user (partial update) |
 | DELETE | `/api/users/:id` | Delete a user |
@@ -184,6 +225,8 @@ curl http://localhost:8002/api/stats
 - `q`: `username` / `email` の部分一致検索（大文字小文字を無視）
 - `sort`: `created_at`（既定）/ `updated_at` / `username` / `email` / `role`
 - `order`: `asc`（既定）/ `desc`
+
+**`GET /api/users/count` / `by_day` / `by_week` / `by_month` / `by_hour_of_day` / `by_day_of_week` / `by_domain` query parameters:** `role` / `q` / `since` / `until` を `/api/users` と同じセマンティクスで受け付ける（`limit` / `offset` / `sort` / `order` は集計エンドポイントでは無視される）。
 
 **Validation rules (POST / PUT):**
 - `username`: 必須（POSTのみ）、トリム後 1〜`MAX_USERNAME_LENGTH`（既定 50）文字
@@ -200,6 +243,9 @@ curl -X POST http://localhost:8003/api/users \
 
 # List users
 curl http://localhost:8003/api/users
+
+# Distribution by email domain
+curl http://localhost:8003/api/users/by_domain
 ```
 
 ## Environment Variables
