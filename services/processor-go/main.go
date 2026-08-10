@@ -1026,6 +1026,146 @@ func messagesByDayOfWeekHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// isoWeekKey は t を UTC に正規化した上で ISO 8601 週キー "YYYY-Www" を返す。
+// ISO 週年 (WeekYear) と ISO 週番号を組み合わせるため、たとえば 2030-12-30 (月曜) は
+// "2031-W01" にビニングされる。文字列 lex 順 = 時系列順を保つため、`sort.Strings`
+// でそのまま昇順並べが成立する。
+func isoWeekKey(t time.Time) string {
+	year, week := t.UTC().ISOWeek()
+	return fmt.Sprintf("%04d-W%02d", year, week)
+}
+
+// messagesByWeekHandler は filters 通過後のメッセージを ISO 8601 週 (YYYY-Www) で
+// ビニングし、週昇順の時系列カウントを返す。
+//
+// /api/messages/by_day は日単位、/api/messages/by_month は月単位の時系列だが、
+// 四半期や半期スパンでのバケットとして日次は粒度が細かすぎ、月次は粗すぎる場合に、
+// 中間解像度としての「週次トレンド」を 1 リクエストで返すのが本ハンドラの用途。
+// 分析／集計は analytics-py / usermgmt-ts の `by_week` エンドポイントと同じ
+// キー形式 (`YYYY-Www`) を採用し、UI 側で 3 サービス共通のパーサを再利用できる。
+//
+// フィルタは parseMessageFilters に集約（channel / q / since / until）。
+// 並び順は週キーの lex 昇順固定（ISO 週の "YYYY-Www" は lex 順 = 時系列順と一致）。
+func messagesByWeekHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	mu.RLock()
+	counts := make(map[string]int)
+	total := 0
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		// CreatedAt の location に依存させないよう、isoWeekKey 内で UTC 化してから
+		// ISO 週キー "YYYY-Www" を取り出す。週境界 (月曜) が location 差で分裂しない。
+		counts[isoWeekKey(m.CreatedAt)]++
+		total++
+	}
+	mu.RUnlock()
+
+	// 週昇順で固定。ISO 週キー "YYYY-Www" の lex 順は時系列順と一致するため、
+	// 単純な sort.Strings で十分。
+	weeks := make([]string, 0, len(counts))
+	for wk := range counts {
+		weeks = append(weeks, wk)
+	}
+	sort.Strings(weeks)
+	byWeek := make([]map[string]interface{}, 0, len(weeks))
+	for _, wk := range weeks {
+		byWeek = append(byWeek, map[string]interface{}{
+			"week":  wk,
+			"count": counts[wk],
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":          total,
+		"distinct_weeks": len(byWeek),
+		"by_week":        byWeek,
+	})
+}
+
+// messagesByMonthHandler は filters 通過後のメッセージを UTC の月 (YYYY-MM) で
+// ビニングし、月昇順の時系列カウントを返す。
+//
+// /api/messages/by_day が日単位の細かい時系列を、/api/messages/by_week が四半期
+// スパンでの中間解像度を返すのに対し、本ハンドラは月次トレンド（半期・年次スパンでの
+// 流量推移、月次レポート、キャパシティ計画の基礎資料）を 1 リクエストで返す。
+// analytics-py / usermgmt-ts の `by_month` エンドポイントと同じキー形式 (`YYYY-MM`)
+// を採用し、3 サービス共通のフロント側パーサ／整形を再利用できる。
+//
+// フィルタは parseMessageFilters に集約（channel / q / since / until）。
+// 並び順は月キーの lex 昇順固定（`YYYY-MM` の lex 順は時系列順と一致）。
+func messagesByMonthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	mu.RLock()
+	counts := make(map[string]int)
+	total := 0
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		// UTC 化してから "2006-01" (YYYY-MM) で月ビニング。異なる location が混入しても
+		// 月境界が JST/UTC 差で分裂しないよう UTC 基準に揃える (by_day と同じ方針)。
+		month := m.CreatedAt.UTC().Format("2006-01")
+		counts[month]++
+		total++
+	}
+	mu.RUnlock()
+
+	// 月昇順で固定。ISO 月キー "YYYY-MM" の lex 順は時系列順と一致するため、
+	// 単純な sort.Strings で十分。
+	months := make([]string, 0, len(counts))
+	for mo := range counts {
+		months = append(months, mo)
+	}
+	sort.Strings(months)
+	byMonth := make([]map[string]interface{}, 0, len(months))
+	for _, mo := range months {
+		byMonth = append(byMonth, map[string]interface{}{
+			"month": mo,
+			"count": counts[mo],
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":           total,
+		"distinct_months": len(byMonth),
+		"by_month":        byMonth,
+	})
+}
+
 // loggingResponseWriter は http.ResponseWriter をラップし、WriteHeader が呼ばれた時点で
 // ステータスコードを記録する。Write が先に呼ばれた場合の暗黙 200 も捕捉するため、
 // wroteHeader フラグで初回のみキャプチャする（多重 WriteHeader 呼び出しは無視される Go
@@ -1124,6 +1264,8 @@ func main() {
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
 	// 日別の時系列カウント（リテラル `by_day` も `{id}` より優先される）。
 	mux.HandleFunc("GET /api/messages/by_day", messagesByDayHandler)
+	mux.HandleFunc("GET /api/messages/by_week", messagesByWeekHandler)
+	mux.HandleFunc("GET /api/messages/by_month", messagesByMonthHandler)
 	mux.HandleFunc("GET /api/messages/by_hour_of_day", messagesByHourOfDayHandler)
 	mux.HandleFunc("GET /api/messages/by_day_of_week", messagesByDayOfWeekHandler)
 	// Go 1.22 の http.ServeMux パスパラメータ機能。`/api/messages` (集合) と
