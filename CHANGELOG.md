@@ -9,7 +9,13 @@
 
 ### Added
 
-- （次回リリースで追加する機能をここに記載）
+- **processor-go**: メッセージ集計の時系列解像度を拡張する 2 つのエンドポイントを追加。
+  - `GET /api/messages/by_week` — ISO 8601 週 (`YYYY-Www`) 別の時系列カウント。
+    日次より粗く月次より細かい中間解像度で、四半期・半期スパンの流量推移把握に使う。
+  - `GET /api/messages/by_month` — UTC 月 (`YYYY-MM`) 別の時系列カウント。
+    長期トレンド分析・月次レポート・キャパシティ計画の基礎資料に使う。
+  - `channel` / `q` / `since` / `until` フィルタは既存の `by_day` 系と同じセマンティクスで受け付ける。
+  - 集計キーは analytics-py / usermgmt-ts の同名エンドポイントと同じ形式 (`YYYY-Www` / `YYYY-MM`) を採用し、3 サービス共通のフロント側パーサ／整形を再利用できる。
 
 ### Changed
 
