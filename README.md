@@ -133,6 +133,8 @@ curl http://localhost:8001/api/events/by_month
 | GET | `/api/messages` | List messages with filtering / pagination / sorting (see params below) |
 | GET | `/api/messages/channels` | distinct な channel 名一覧を返す軽量エンドポイント（ドロップダウン populate 用途）。`q` / `since` / `until` / `order` / `limit` / `offset` を受け付ける |
 | GET | `/api/messages/by_day` | UTC 日付 (`YYYY-MM-DD`) 別の時系列カウント。populated-only で日付昇順 |
+| GET | `/api/messages/by_week` | ISO 8601 週 (`YYYY-Www`) 別の時系列カウント。日次より粗く月次より細かい中間解像度、populated-only で週昇順 |
+| GET | `/api/messages/by_month` | UTC 月 (`YYYY-MM`) 別の時系列カウント。長期トレンド用途、populated-only で月昇順 |
 | GET | `/api/messages/by_hour_of_day` | UTC 時刻 (`00`〜`23`) 別の周期分布。1 日内の流量集中を把握、populated-only で時間順 |
 | GET | `/api/messages/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) 別の周期分布。曜日別キャパシティプランニング用途、populated-only で曜日順 |
 | GET | `/api/messages/{id}` | Get a single message by ID（該当なしは `404`） |
@@ -153,7 +155,7 @@ curl http://localhost:8001/api/events/by_month
 - `order`: `asc`（既定）/ `desc`（channel 名昇順 / 降順）
 - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
 
-**`GET /api/messages/by_day` / `by_hour_of_day` / `by_day_of_week` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）
+**`GET /api/messages/by_day` / `by_week` / `by_month` / `by_hour_of_day` / `by_day_of_week` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）
 
 **`GET /api/stats` query parameters:** `channel` / `q` / `since` / `until` を `/api/messages` と同じセマンティクスで受け付け、フィルタ後のメッセージから集計値を返す。`top_channels_limit` (既定 `5`、上限 `100`) で `top_channels` の件数を制御できる。GET 以外のメソッドは 405。
 
@@ -174,7 +176,7 @@ curl http://localhost:8001/api/events/by_month
 ```
 
 - `distinct_channels`: フィルタ通過後に登場した channel のユニーク数（`channels` マップのキー数と一致）
-- `oldest` / `newest`: フィルタ通過後の `created_at` の最小・最大（RFC 3339）。マッチ 0 件のときは両方とも `null`。クライアントが追加クエリ無しに「いまフィルタ条件で残っているデータの時間範囲」を把握できる
+- `oldest` / `newest`: フィルタ通過後の `created_at` の最小・最大(RFC 3339)。マッチ 0 件のときは両方とも `null`。クライアントが追加クエリ無しに「いまフィルタ条件で残っているデータの時間範囲」を把握できる
 - `top_channels`: `count` 降順（同数はチャネル名昇順）で先頭 `top_channels_limit` 件。`channels` マップから UI 側で再計算せず、そのまま「上位 N チャネル」バーチャートに使える
 
 集計は 1 スキャンで行うため、フィルタが付いても挙動コストは従来と変わらない。
@@ -197,8 +199,10 @@ curl http://localhost:8002/api/stats
 # Distinct channels for a dropdown
 curl http://localhost:8002/api/messages/channels
 
-# Daily trend
+# Daily / weekly / monthly trend
 curl http://localhost:8002/api/messages/by_day
+curl http://localhost:8002/api/messages/by_week
+curl http://localhost:8002/api/messages/by_month
 ```
 
 ### User Management Service (`:8003`)
