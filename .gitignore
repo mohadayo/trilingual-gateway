@@ -12,9 +12,11 @@ venv/
 /services/processor-go/processor
 
 # Node / TypeScript
+# NOTE: services/usermgmt-ts/package-lock.json は
+# CI (`npm ci` / setup-node の `cache-dependency-path`) と Dependabot が参照する
+# 前提でコミットしているため、ここでは ignore しない。
 node_modules/
 /services/usermgmt-ts/dist/
-/services/usermgmt-ts/package-lock.json
 
 # Environment
 .env
