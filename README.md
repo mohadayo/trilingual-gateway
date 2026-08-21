@@ -23,6 +23,8 @@ graph TB
     TS --- HC3[/health]
 ```
 
+> 各サービスの内部構造・共通ポリシー (集計エンドポイントの命名規約 / リクエスト観測性 / 意図的な非採用事項) の詳細は [`docs/architecture.md`](docs/architecture.md) を参照してください。
+
 ## Services
 
 | Service | Language | Port | Description |
