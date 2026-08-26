@@ -6,6 +6,28 @@ import { v4 as uuidv4 } from "uuid";
 const MAX_REQUEST_BODY = process.env.MAX_REQUEST_BODY || "100kb";
 
 const app = express();
+
+// フレームワーク情報を露出しない。Express は既定で `X-Powered-By: Express`
+// を返すが、これは攻撃者に既知脆弱性版を探す手がかりを与えるだけで、
+// クライアントに機能上のメリットは無い。
+app.disable("x-powered-by");
+
+// すべての応答に最小限のセキュリティレスポンスヘッダを付与する。
+// `helmet` を導入せず素の middleware で完結させることで依存を増やさない。
+//
+// - `X-Content-Type-Options: nosniff`: JSON エンドポイントを別 MIME として
+//   解釈させる MIME sniffing 攻撃を抑止。
+// - `X-Frame-Options: DENY`: 本 API を `<iframe>` に埋め込ませない
+//   (clickjacking 対策)。JSON API はフレーム表示を意図しない。
+// - `Referrer-Policy: no-referrer`: 内部 URL やクエリ文字列がリンク先の
+//   Referrer ヘッダとして外部に漏れないよう抑止。
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+});
+
 app.use(express.json({ limit: MAX_REQUEST_BODY }));
 
 // express.json の limit 超過は entity.too.large になる。既定ハンドラに
