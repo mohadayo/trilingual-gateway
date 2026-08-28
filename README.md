@@ -327,6 +327,16 @@ trilingual-gateway/
             └── app.test.ts
 ```
 
+## Documentation
+
+`docs/` 配下に、開発・運用・障害対応のためのドキュメントを整理しています。
+
+- [`docs/architecture.md`](docs/architecture.md) — 各サービスの内部構造・共通ポリシー（集計エンドポイントの命名規約 / リクエスト観測性 / 意図的な非採用事項）
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — 障害発生時の症状別切り分け・復旧手順
+- [`docs/FAQ.md`](docs/FAQ.md) — 設定・運用・仕様に関するよくある質問と回答
+
+コントリビュートのガイドは [`CONTRIBUTING.md`](CONTRIBUTING.md)、コミュニティ規範は [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、セキュリティ報告は [`SECURITY.md`](SECURITY.md) を参照してください。
+
 ## License
 
 MIT
