@@ -35,6 +35,7 @@ func buildTestMux() http.Handler {
 		}
 	})
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
+	mux.HandleFunc("GET /api/messages/count", messagesCountHandler)
 	mux.HandleFunc("GET /api/messages/by_day", messagesByDayHandler)
 	mux.HandleFunc("GET /api/messages/by_week", messagesByWeekHandler)
 	mux.HandleFunc("GET /api/messages/by_month", messagesByMonthHandler)
