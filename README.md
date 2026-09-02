@@ -134,6 +134,7 @@ curl http://localhost:8001/api/events/by_month
 | POST | `/api/messages` | Publish a message to a channel |
 | GET | `/api/messages` | List messages with filtering / pagination / sorting (see params below) |
 | GET | `/api/messages/channels` | distinct な channel 名一覧を返す軽量エンドポイント（ドロップダウン populate 用途）。`q` / `since` / `until` / `order` / `limit` / `offset` を受け付ける |
+| GET | `/api/messages/count` | フィルタ後の件数のみを返す軽量エンドポイント（`total` / `distinct_channels` / `by_channel`）。UI のバッジ表示・ページャ初期化用途で `/api/stats` より応答が小さい (analytics-py `/api/events/count` / usermgmt-ts `/api/users/count` と対称) |
 | GET | `/api/messages/by_day` | UTC 日付 (`YYYY-MM-DD`) 別の時系列カウント。populated-only で日付昇順 |
 | GET | `/api/messages/by_week` | ISO 8601 週 (`YYYY-Www`) 別の時系列カウント。日次より粗く月次より細かい中間解像度、populated-only で週昇順 |
 | GET | `/api/messages/by_month` | UTC 月 (`YYYY-MM`) 別の時系列カウント。長期トレンド用途、populated-only で月昇順 |
@@ -156,6 +157,8 @@ curl http://localhost:8001/api/events/by_month
 - `channel` / `q` / `since` / `until`: `/api/messages` と同じセマンティクスでフィルタ後の distinct を取る
 - `order`: `asc`（既定）/ `desc`（channel 名昇順 / 降順）
 - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
+
+**`GET /api/messages/count` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）。レスポンスは `total`（フィルタ通過後の合計件数）/ `distinct_channels`（登場した channel のユニーク数）/ `by_channel`（channel → count の map、`/api/stats` の `channels` フィールドと同形式）の 3 フィールドのみ。GET 以外は 405、`since > until` や不正な時刻・100 文字超の `q` は 400。
 
 **`GET /api/messages/by_day` / `by_week` / `by_month` / `by_hour_of_day` / `by_day_of_week` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）
 
@@ -200,6 +203,10 @@ curl http://localhost:8002/api/stats
 
 # Distinct channels for a dropdown
 curl http://localhost:8002/api/messages/channels
+
+# Lightweight count (total / distinct_channels / by_channel) for badges and pager init
+curl http://localhost:8002/api/messages/count
+curl "http://localhost:8002/api/messages/count?channel=alerts&since=2030-01-01T00:00:00Z"
 
 # Daily / weekly / monthly trend
 curl http://localhost:8002/api/messages/by_day
