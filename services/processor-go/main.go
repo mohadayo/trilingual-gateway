@@ -822,6 +822,57 @@ func nullableTime(t time.Time, count int) interface{} {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
+// messagesCountHandler は filters 通過後のメッセージ件数のみを軽量に返す。
+// `/api/stats` は `oldest` / `newest` / `top_channels` まで一括で返すため、UI の
+// バッジ表示・ページャ初期化・「該当件数のみ知りたい」用途では過剰になる。
+// 本ハンドラは `total` / `distinct_channels` / `by_channel` の 3 フィールドのみを返し、
+// analytics-py の `/api/events/count` および usermgmt-ts の `/api/users/count` と
+// 対称的な軽量集計エンドポイントの命名規約 (`count`) を processor-go にも揃える。
+//
+// `by_channel` は channel → count の map で、`/api/stats` の `channels` フィールドと
+// 同じ形式にすることで、フロント側で 3 サービス共通のパーサを再利用できる。
+// oldest/newest/top_channels の算出をスキップするため、大量メッセージがある場合の
+// レスポンス生成コストは `/api/stats` より軽い (sort と時刻比較を省略)。
+//
+// フィルタは parseMessageFilters に集約（channel / q / since / until）で他エンドポイントと
+// セマンティクスを一致させる。GET 以外は 405 を返す。
+func messagesCountHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	query := r.URL.Query()
+	filters, ferr := parseMessageFilters(query)
+	if ferr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: ferr})
+		return
+	}
+
+	mu.RLock()
+	byChannel := make(map[string]int)
+	total := 0
+	for _, m := range messages {
+		if !filters.matches(m) {
+			continue
+		}
+		byChannel[m.Channel]++
+		total++
+	}
+	mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":             total,
+		"distinct_channels": len(byChannel),
+		"by_channel":        byChannel,
+	})
+}
+
 // messagesByDayHandler は filters 通過後のメッセージを UTC 日付 (YYYY-MM-DD) で
 // ビニングし、日付昇順の時系列カウントを返す。
 //
@@ -1262,6 +1313,9 @@ func main() {
 	// distinct な channel 一覧。`GET /api/messages/{id}` ワイルドカードよりも
 	// リテラルパターンが優先されるため、`channels` を ID として誤解されない。
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
+	// 軽量な件数集計 (analytics-py `/api/events/count` と対称的な命名)。
+	// リテラル `count` も `{id}` より優先される。
+	mux.HandleFunc("GET /api/messages/count", messagesCountHandler)
 	// 日別の時系列カウント（リテラル `by_day` も `{id}` より優先される）。
 	mux.HandleFunc("GET /api/messages/by_day", messagesByDayHandler)
 	mux.HandleFunc("GET /api/messages/by_week", messagesByWeekHandler)
