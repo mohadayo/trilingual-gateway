@@ -8,6 +8,10 @@
 
 - **[architecture.md](./architecture.md)** — ゲートウェイと各バックエンドの責務、サービス間通信、リクエストのルーティング・変換フロー、コンテナ構成を整理したドキュメント。「どこを触るとどこに影響するか」を掴みたい時の起点。
 
+### API を素早く横断で確認したい
+
+- **[ENDPOINTS.md](./ENDPOINTS.md)** — 3 サービス (analytics-py / processor-go / usermgmt-ts) が公開する HTTP エンドポイントを 1 枚で見渡すためのリファレンス。集計エンドポイント (`/count` / `/by_day` / `/by_week` / `/by_month` / `/by_hour_of_day` / `/by_day_of_week`) がサービスごとにどれだけ揃っているかを対応マトリクスで確認できる。個別クエリ仕様はルート README を一次情報源としてリンクしているため二重メンテにならない。
+
 ### 運用中に困っている
 
 - **[RUNBOOK.md](./RUNBOOK.md)** — 起動・停止・再起動、環境変数の切り替え、Docker Compose での立ち上げ、想定される定常運用手順を集約した実行手順書。
