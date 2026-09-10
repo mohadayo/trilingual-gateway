@@ -4,8 +4,18 @@ services:
     ports:
       - "${ANALYTICS_PORT:-8001}:8001"
     environment:
+      # コンテナ内ポートは Compose の port mapping 側 (${ANALYTICS_PORT:-8001}:8001)
+      # と揃えるため 8001 に固定する。ホスト側だけ .env で切り替えられる。
       - ANALYTICS_PORT=8001
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # 以下は .env.example / README で「.env で上書き可能」としているが、
+      # environment: に載っていないとコンテナに届かないため明示列挙する。
+      # 既定値は services/analytics-py/app.py の os.getenv デフォルトと一致させる。
+      - MAX_EVENTS=${MAX_EVENTS:-10000}
+      - DEFAULT_PAGE_LIMIT=${DEFAULT_PAGE_LIMIT:-50}
+      - MAX_PAGE_LIMIT=${MAX_PAGE_LIMIT:-500}
+      - MAX_PAYLOAD_SIZE=${MAX_PAYLOAD_SIZE:-1048576}
+      - MAX_EVENT_NAME_LENGTH=${MAX_EVENT_NAME_LENGTH:-200}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 10s
@@ -18,7 +28,22 @@ services:
     ports:
       - "${PROCESSOR_PORT:-8002}:8002"
     environment:
+      # コンテナ内ポートはホスト側とは独立に 8002 固定 (analytics-py と同じ理由)。
       - PROCESSOR_PORT=8002
+      # 以下は .env.example / README で「.env で上書き可能」としているが、
+      # environment: に載っていないとコンテナに届かないため明示列挙する。
+      # 既定値は services/processor-go 実装の os.Getenv フォールバックと揃える。
+      - MAX_MESSAGES=${MAX_MESSAGES:-10000}
+      - DEFAULT_PAGE_LIMIT=${DEFAULT_PAGE_LIMIT:-50}
+      - MAX_PAGE_LIMIT=${MAX_PAGE_LIMIT:-1000}
+      - MAX_CHANNEL_LENGTH=${MAX_CHANNEL_LENGTH:-256}
+      - MAX_PAYLOAD_LENGTH=${MAX_PAYLOAD_LENGTH:-65536}
+      - MAX_SEARCH_LENGTH=${MAX_SEARCH_LENGTH:-100}
+      - PROCESSOR_READ_HEADER_TIMEOUT=${PROCESSOR_READ_HEADER_TIMEOUT:-5}
+      - PROCESSOR_READ_TIMEOUT=${PROCESSOR_READ_TIMEOUT:-15}
+      - PROCESSOR_WRITE_TIMEOUT=${PROCESSOR_WRITE_TIMEOUT:-15}
+      - PROCESSOR_IDLE_TIMEOUT=${PROCESSOR_IDLE_TIMEOUT:-60}
+      - SHUTDOWN_TIMEOUT_SECONDS=${SHUTDOWN_TIMEOUT_SECONDS:-30}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8002/health"]
       interval: 10s
@@ -31,7 +56,17 @@ services:
     ports:
       - "${USERMGMT_PORT:-8003}:8003"
     environment:
+      # コンテナ内ポートはホスト側とは独立に 8003 固定 (他 2 サービスと同じ理由)。
       - USERMGMT_PORT=8003
+      # 以下は .env.example / README で「.env で上書き可能」としているが、
+      # environment: に載っていないとコンテナに届かないため明示列挙する。
+      # 既定値は services/usermgmt-ts 実装の process.env フォールバックと揃える。
+      - MAX_REQUEST_BODY=${MAX_REQUEST_BODY:-100kb}
+      - MAX_USERNAME_LENGTH=${MAX_USERNAME_LENGTH:-50}
+      - USERS_DEFAULT_LIMIT=${USERS_DEFAULT_LIMIT:-50}
+      - USERS_MAX_LIMIT=${USERS_MAX_LIMIT:-200}
+      - MAX_SEARCH_LENGTH=${MAX_SEARCH_LENGTH:-100}
+      - SHUTDOWN_TIMEOUT_MS=${SHUTDOWN_TIMEOUT_MS:-10000}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8003/health"]
       interval: 10s
