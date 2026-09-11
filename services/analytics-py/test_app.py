@@ -1001,3 +1001,47 @@ def test_events_by_day_of_week_since_greater_than_until_returns_400(client):
 def test_events_by_day_of_week_blank_q_returns_400(client):
     resp = client.get("/api/events/by_day_of_week?q=%20%20%20")
     assert resp.status_code == 400
+
+
+# ---------- MAX_EVENTS floor guard (GH-186) ----------
+
+def test_max_events_floor_guard_zero(monkeypatch):
+    """MAX_EVENTS=0 で reload しても下限 1 にクランプされる。
+
+    もし floor guard が無いと、track_event の eviction が挿入直後の 1 レコードを
+    削除して silent data loss を起こす。この回帰テストは import 時点の
+    正規化が保たれていることを固定する。
+    """
+    import importlib
+    monkeypatch.setenv("MAX_EVENTS", "0")
+    import app as app_module
+    reloaded = importlib.reload(app_module)
+    try:
+        assert reloaded.MAX_EVENTS == 1
+        # 上限 1 でも track_event → GET は成立する（挿入直後に即消しにならない）
+        c = reloaded.app.test_client()
+        reloaded.events_store.clear()
+        resp = c.post(
+            "/api/events",
+            json={"event_name": "signup"},
+        )
+        assert resp.status_code == 201
+        get_resp = c.get("/api/events")
+        assert get_resp.status_code == 200
+        assert get_resp.get_json()["total"] == 1
+    finally:
+        monkeypatch.delenv("MAX_EVENTS", raising=False)
+        importlib.reload(app_module)
+
+
+def test_max_events_floor_guard_negative(monkeypatch):
+    """負値も同様にクランプされる。"""
+    import importlib
+    monkeypatch.setenv("MAX_EVENTS", "-3")
+    import app as app_module
+    reloaded = importlib.reload(app_module)
+    try:
+        assert reloaded.MAX_EVENTS == 1
+    finally:
+        monkeypatch.delenv("MAX_EVENTS", raising=False)
+        importlib.reload(app_module)

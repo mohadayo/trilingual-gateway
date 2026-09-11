@@ -57,7 +57,10 @@ events_store: list[dict] = []
 events_lock = threading.Lock()
 
 DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
-MAX_EVENTS = int(os.getenv("MAX_EVENTS", "10000"))
+# `MAX_EVENTS` に下限クランプを付ける。誤って `0` や負値を設定すると
+# `track_event` の eviction ループが挿入直後の 1 レコードすら削除して、
+# POST は 201 のまま GET が常に空になる silent data loss を招く。
+MAX_EVENTS = max(1, int(os.getenv("MAX_EVENTS", "10000")))
 MAX_PAGE_LIMIT = int(os.getenv("MAX_PAGE_LIMIT", "500"))
 MAX_PAYLOAD_SIZE = int(os.getenv("MAX_PAYLOAD_SIZE", str(1024 * 1024)))
 MAX_EVENT_NAME_LENGTH = int(os.getenv("MAX_EVENT_NAME_LENGTH", "200"))
