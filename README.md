@@ -296,8 +296,6 @@ GitHub Actions workflow runs on every push and PR to `main`:
 3. **test-typescript** — Lint with ESLint, test with Jest
 4. **docker-build** — Verify all Dockerfiles build successfully
 
-> **Note:** The `.github/workflows/ci.yml` file may need to be manually added after initial repository setup due to GitHub API limitations.
-
 ## Project Structure
 
 ```
@@ -342,6 +340,8 @@ trilingual-gateway/
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — 障害発生時の症状別切り分け・復旧手順
 - [`docs/FAQ.md`](docs/FAQ.md) — 設定・運用・仕様に関するよくある質問と回答
 - [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — 3 サービス横断で使う用語（アーキテクチャ / ドメイン / 集計エンドポイント / 共通クエリ / 観測性 / 環境変数命名規約）の用語集
+- [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md) — 3 サービスの REST エンドポイントを 1 枚で横断表示するリファレンス（集計エンドポイントの対応マトリクス付き）
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — インシデント初動フロー・サービス別リカバリ手順・エスカレーション基準の運用ランブック
 
 コントリビュートのガイドは [`CONTRIBUTING.md`](CONTRIBUTING.md)、コミュニティ規範は [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、セキュリティ報告は [`SECURITY.md`](SECURITY.md) を参照してください。
 
