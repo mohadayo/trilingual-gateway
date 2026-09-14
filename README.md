@@ -155,7 +155,7 @@ curl http://localhost:8001/api/events/by_month
 
 **`GET /api/messages/channels` query parameters:**
 - `channel` / `q` / `since` / `until`: `/api/messages` と同じセマンティクスでフィルタ後の distinct を取る
-- `order`: `asc`（既定）/ `desc`（channel 名昇順 / 降順）
+- `order`: `asc`(既定)/ `desc`(channel 名昇順 / 降順)
 - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
 
 **`GET /api/messages/count` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）。レスポンスは `total`（フィルタ通過後の合計件数）/ `distinct_channels`（登場した channel のユニーク数）/ `by_channel`（channel → count の map、`/api/stats` の `channels` フィールドと同形式）の 3 フィールドのみ。GET 以外は 405、`since > until` や不正な時刻・100 文字超の `q` は 400。
@@ -296,8 +296,6 @@ GitHub Actions workflow runs on every push and PR to `main`:
 3. **test-typescript** — Lint with ESLint, test with Jest
 4. **docker-build** — Verify all Dockerfiles build successfully
 
-> **Note:** The `.github/workflows/ci.yml` file may need to be manually added after initial repository setup due to GitHub API limitations.
-
 ## Project Structure
 
 ```
@@ -342,6 +340,8 @@ trilingual-gateway/
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — 障害発生時の症状別切り分け・復旧手順
 - [`docs/FAQ.md`](docs/FAQ.md) — 設定・運用・仕様に関するよくある質問と回答
 - [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — 3 サービス横断で使う用語（アーキテクチャ / ドメイン / 集計エンドポイント / 共通クエリ / 観測性 / 環境変数命名規約）の用語集
+- [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md) — 3 サービスの REST エンドポイントを 1 枚で横断表示するリファレンス（集計エンドポイントの対応マトリクス付き）
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — インシデント初動フロー・サービス別リカバリ手順・エスカレーション基準の運用ランブック
 
 コントリビュートのガイドは [`CONTRIBUTING.md`](CONTRIBUTING.md)、コミュニティ規範は [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、セキュリティ報告は [`SECURITY.md`](SECURITY.md) を参照してください。
 
