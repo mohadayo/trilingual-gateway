@@ -155,7 +155,7 @@ curl http://localhost:8001/api/events/by_month
 
 **`GET /api/messages/channels` query parameters:**
 - `channel` / `q` / `since` / `until`: `/api/messages` と同じセマンティクスでフィルタ後の distinct を取る
-- `order`: `asc`(既定)/ `desc`(channel 名昇順 / 降順)
+- `order`: `asc`（既定）/ `desc`（channel 名昇順 / 降順）
 - `limit` / `offset`: `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_LIMIT` を流用
 
 **`GET /api/messages/count` query parameters:** `channel` / `q` / `since` / `until`（`/api/messages` と同じ意味）。レスポンスは `total`（フィルタ通過後の合計件数）/ `distinct_channels`（登場した channel のユニーク数）/ `by_channel`（channel → count の map、`/api/stats` の `channels` フィールドと同形式）の 3 フィールドのみ。GET 以外は 405、`since > until` や不正な時刻・100 文字超の `q` は 400。
