@@ -25,6 +25,32 @@ def _access_log_start():
 
 
 @app.after_request
+def _security_headers(response):
+    """すべての応答に最小限のセキュリティレスポンスヘッダを付与する。
+
+    `usermgmt-ts` 側の Express ミドルウェア (`src/app.ts`) と同じセマンティクスで、
+    3 サービス間で HTTP 応答のセキュリティ姿勢を統一する:
+
+    - ``X-Content-Type-Options: nosniff``: JSON エンドポイントを別 MIME として
+      解釈させる MIME sniffing 攻撃を抑止。
+    - ``X-Frame-Options: DENY``: 本 API を ``<iframe>`` に埋め込ませない
+      (clickjacking 対策)。JSON API はフレーム表示を意図しない。
+    - ``Referrer-Policy: no-referrer``: 内部 URL やクエリ文字列がリンク先の
+      Referrer ヘッダとして外部に漏れないよう抑止。
+
+    `helmet` 相当の外部依存は導入せず、素の ``after_request`` フックで完結させる
+    ことで依存追加を避ける。``setdefault`` 相当（既に値があれば上書きしない）にはせず、
+    決め打ちで固定値を返す方が、ハンドラ側が誤ってヘッダを緩めた場合の
+    回帰を防げる。エラー応答経路 (400 / 404 / 413 等) でも ``after_request`` は
+    走るため、全応答で一貫したポリシーを保証できる。
+    """
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@app.after_request
 def _access_log_end(response):
     """応答ステータスと処理時間を 1 行の INFO ログに集約する。
 
