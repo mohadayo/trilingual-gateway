@@ -274,6 +274,7 @@ See [`.env.example`](.env.example) for all available configuration:
 | `MAX_PAGE_LIMIT` | 500 | analytics-py: `GET /api/events` の `limit` 上限 |
 | `MAX_PAYLOAD_SIZE` | 1048576 | analytics-py: リクエストボディの最大サイズ（バイト） |
 | `MAX_EVENT_NAME_LENGTH` | 200 | analytics-py: `event_name` の最大文字数 |
+| `MAX_MESSAGES` | 10000 | processor-go: メモリ上に保持する最大メッセージ数（超過時は古いものから追い出し） |
 | `MAX_CHANNEL_LENGTH` | 256 | processor-go: `POST /api/messages` の `channel` の最大文字数 |
 | `MAX_PAYLOAD_LENGTH` | 65536 | processor-go: `POST /api/messages` の `payload` の最大文字数 |
 | `PROCESSOR_PORT` | 8002 | Processor service port |
@@ -281,11 +282,14 @@ See [`.env.example`](.env.example) for all available configuration:
 | `PROCESSOR_READ_TIMEOUT` | 15 | processor-go: 本文読み取りタイムアウト秒 |
 | `PROCESSOR_WRITE_TIMEOUT` | 15 | processor-go: レスポンス書き込みタイムアウト秒 |
 | `PROCESSOR_IDLE_TIMEOUT` | 60 | processor-go: Keep-Alive アイドルタイムアウト秒 |
+| `SHUTDOWN_TIMEOUT_SECONDS` | 30 | processor-go: SIGINT/SIGTERM 受信後、進行中リクエストの完了を待つグレースフルシャットダウンの最大秒数 |
 | `USERMGMT_PORT` | 8003 | User management service port |
+| `MAX_REQUEST_BODY` | 100kb | usermgmt-ts: リクエストボディの最大サイズ（`express.json` の `limit` オプション形式、例 `100kb` / `1mb`） |
 | `MAX_USERNAME_LENGTH` | 50 | usermgmt-ts: `username` の最大文字数 |
 | `USERS_DEFAULT_LIMIT` | 50 | usermgmt-ts: `GET /api/users` の既定ページサイズ |
 | `USERS_MAX_LIMIT` | 200 | usermgmt-ts: `GET /api/users` の `limit` 上限 |
 | `MAX_SEARCH_LENGTH` | 100 | usermgmt-ts: `GET /api/users` の検索クエリ `q` の最大文字数 |
+| `SHUTDOWN_TIMEOUT_MS` | 10000 | usermgmt-ts: SIGTERM/SIGINT 受信後、進行中リクエストの完了を待つグレースフルシャットダウンの最大ミリ秒数 |
 
 ## CI/CD
 
