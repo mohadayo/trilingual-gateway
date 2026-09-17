@@ -1,0 +1,41 @@
+# ソースコード・ドキュメントに対するスペルチェック
+#
+# 目的:
+#   README / CHANGELOG / CONTRIBUTING / SECURITY / docs / Makefile / Dockerfile
+#   および 3 サービスのソースコード (Python / Go / TypeScript) 上の typo を
+#   PR / push 時点で早期検知する。既存 `ci.yml` (テスト / lint) とは
+#   役割が独立した軽量ジョブとして走らせる。
+#
+# 設計上のポイント:
+#   - `crate-ci/typos-action` はプリビルドバイナリを実行するのみで postinstall や
+#     ネットワークアクセスを追加で必要としない。
+#   - 権限は `contents: read` のみに限定 (`security-events` 等は付与しない)。
+#   - `concurrency` により同一 ref での多重実行を抑止し、ランナー使用量を節約。
+
+name: typos
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typos:
+    name: typos
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run typos
+        uses: crate-ci/typos@v1.29.4
