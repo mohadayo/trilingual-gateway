@@ -1757,7 +1757,7 @@ func TestGetMessageByID_RejectsNonGETMethods(t *testing.T) {
 	}
 }
 
-func TestGetMessageByID_DoesNotMisMatchWithinSameChannel(t *testing.T) {
+func TestGetMessageByID_DoesNotMismatchWithinSameChannel(t *testing.T) {
 	// 同じ channel に複数メッセージがあっても、ID 完全一致のもののみ返ること。
 	seeded := seedThreeMessages(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/messages/id-1", nil)
