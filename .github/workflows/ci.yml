@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# GITHUB_TOKEN の権限をワークフロー単位で最小権限に固定する。
+# CI ジョブが必要とするのはソースコードの checkout のみのため `contents: read` に限定し、
+# それ以外 (issues / pull-requests / packages / id-token など) はすべて暗黙的に none とする。
+# これにより、依存 Action の侵害や PR からのスクリプトインジェクションが発生した場合でも、
+# GITHUB_TOKEN 経由でリポジトリを書き換えられないようにする (least privilege)。
+# 参照: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
+permissions:
+  contents: read
+
 # 同一ワークフロー・同一 ref (PR ブランチや main) で新しいジョブが起動したら、
 # 進行中の古いジョブをキャンセルする。PR に短時間で連続 push した場合の
 # 実行枠・実行時間の無駄を削減する。
