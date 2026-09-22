@@ -754,6 +754,75 @@ app.get("/api/users/by_month", (req: Request, res: Response) => {
   });
 });
 
+// `/api/users/:id` より前に登録して、`:id == "by_year"` 衝突を防ぐ。
+// `parseListQuery` のうちフィルタ系（role / q / since / until）のみ評価し、
+// `limit / offset / sort / order` は集計では意味を持たないため無視する。
+//
+// バケットキーは UTC カレンダー年 (`YYYY`)。`toISOString().slice(0, 4)`
+// で常に UTC の年文字列を得られる。lex 昇順 = カレンダー昇順を保つため
+// ソートは自然順で足りる（既存 `by_month` の `YYYY-MM` と同じ設計思想）。
+// populated-only: 母集団 0 の年は配列に含めない（既存 `by_day` /
+// `by_month` / `by_week` / `by_hour_of_day` / `by_day_of_week` と同じ方針）。
+// 月次より粗い粒度で、複数年運用の登録推移 (year-over-year) を 1 リクエストで
+// 把握するための集計。日次・週次・月次・年次のはしごを揃えることで、
+// クライアント側で year-over-year のフィルタと再集計を回避できる。
+app.get("/api/users/by_year", (req: Request, res: Response) => {
+  const parsed = parseListQuery(req.query as Record<string, unknown>);
+  if (!parsed.ok) {
+    log("WARN", `GET /api/users/by_year rejected: ${parsed.error}`);
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const { role, q, since, until } = parsed;
+
+  let list = Array.from(users.values());
+  if (role !== null) {
+    list = list.filter((u) => u.role === role);
+  }
+  if (q !== null) {
+    list = list.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q),
+    );
+  }
+  if (since !== null || until !== null) {
+    list = list.filter((u) => {
+      const ts = new Date(u.created_at);
+      if (Number.isNaN(ts.getTime())) {
+        return false;
+      }
+      if (since !== null && ts < since) return false;
+      if (until !== null && ts > until) return false;
+      return true;
+    });
+  }
+
+  // UTC 年キー ("YYYY") → 件数。
+  // 壊れた `created_at` (パース不能) は安全側で集計対象外（既存の他集計と同じ）。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const u of list) {
+    const ts = new Date(u.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const key = ts.toISOString().slice(0, 4);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 年キーの lex 昇順 = カレンダー昇順（"2024" < "2025" < "2026"）。
+  // populated-only: 件数 0 の年は含めない（by_month / by_day と同じ）。
+  const byYear = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([year, count]) => ({ year, count }));
+
+  res.json({
+    total,
+    distinct_years: byYear.length,
+    by_year: byYear,
+  });
+});
+
 // ISO 8601 週番号を「YYYY-Www」形式で返すヘルパ。木曜合わせアルゴリズム:
 //   1. その日の週の木曜を求める（月曜起点、木曜が属する年 = ISO 週年）
 //   2. その年 1/1 の木曜と何日離れているかで週番号を計算
