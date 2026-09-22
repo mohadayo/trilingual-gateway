@@ -196,7 +196,10 @@ describe("GET /api/users/by_year", () => {
     expect(res.body.total).toBe(4);
     expect(res.body.distinct_years).toBe(4);
     expect(res.body.by_year).toEqual([
-      { year: "2025", count: 1 },
+      { year: "2019", count: 1 },
+      { year: "2020", count: 1 },
+      { year: "2021", count: 1 },
+      { year: "2029", count: 1 },
     ]);
   });
 });
