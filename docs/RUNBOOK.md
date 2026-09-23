@@ -11,6 +11,7 @@ Trilingual Gateway（Python / Go / TypeScript の 3 言語構成）の運用中�
    - `processor-go` (Go プロセッサ) の応答
    - `analytics-py` (Python 集計) の応答
    - `docker-compose ps` で全サービスの状態
+   - 3 サービスの `/health` を 1 コマンドで確認したい場合は §3.1 の `scripts/health-check.sh` を利用
 3. **暫定対応** — 影響が拡大している場合は該当サービスをリスタート（下記 §2）
 4. **原因調査** — [`docs/TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) の症状マトリクスから該当項目を辿る
 5. **恒久対応** — 修正 PR / 設定変更 / 依存側への連絡
@@ -69,6 +70,28 @@ docker-compose exec <service> sh
 docker volume ls
 docker network ls
 ```
+
+### 3.1 3 サービス一括の疎通確認 (`scripts/health-check.sh`)
+
+`docker compose up` 後や再起動直後に、3 サービス (`analytics-py` / `processor-go` / `usermgmt-ts`) の `/health` を 1 コマンドで確認するためのヘルパーです。ホスト側から `curl` / `wget` を用いて疎通結果を色分け表示し、1 つでも失敗があれば非 0 終了します（CI や `make` からもチェイン可能）。
+
+```bash
+# 既定 (127.0.0.1 の 8001 / 8002 / 8003) を確認
+bash scripts/health-check.sh
+
+# ホストを差し替えて確認
+HEALTH_HOST=example.internal bash scripts/health-check.sh
+
+# ポートを差し替えて確認 (.env で上書きしている場合)
+ANALYTICS_PORT=9001 PROCESSOR_PORT=9002 USERMGMT_PORT=9003 \
+  bash scripts/health-check.sh
+
+# 実行権限を付けて直接起動できるようにする (初回のみ)
+chmod +x scripts/health-check.sh
+./scripts/health-check.sh
+```
+
+上書き可能な環境変数と挙動の詳細は、スクリプト冒頭のヘッダコメント（`bash scripts/health-check.sh --help` でも表示）を参照してください。
 
 ## 4. エスカレーション基準
 
