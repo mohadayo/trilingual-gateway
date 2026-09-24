@@ -1,5 +1,12 @@
 # Trilingual Gateway
 
+[![CI](https://github.com/mohadayo/trilingual-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/mohadayo/trilingual-gateway/actions/workflows/ci.yml)
+[![Typos](https://github.com/mohadayo/trilingual-gateway/actions/workflows/typos.yml/badge.svg)](https://github.com/mohadayo/trilingual-gateway/actions/workflows/typos.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12+-3776ab.svg?logo=python&logoColor=white)](services/)
+[![Go](https://img.shields.io/badge/go-1.22+-00add8.svg?logo=go&logoColor=white)](services/)
+[![TypeScript](https://img.shields.io/badge/typescript-node%2022-3178c6.svg?logo=typescript&logoColor=white)](services/)
+
 A polyglot microservices platform built with **Python**, **Go**, and **TypeScript**. Each service handles a distinct domain — analytics event tracking, real-time message processing, and user management — and exposes a RESTful API with health checks and structured logging.
 
 ## Architecture
