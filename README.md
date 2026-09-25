@@ -311,36 +311,61 @@ GitHub Actions workflow runs on every push and PR to `main`:
 
 ```
 trilingual-gateway/
-├── docker-compose.yml
-├── Makefile
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
+├── .tool-versions
+├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── Makefile
 ├── README.md
+├── SECURITY.md
+├── docker-compose.yml
 ├── .github/
+│   ├── CODEOWNERS
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.md
+│   │   ├── config.yml
+│   │   └── feature_request.md
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   ├── SUPPORT.md
 │   └── workflows/
-│       └── ci.yml
+│       ├── ci.yml
+│       └── typos.yml
+├── docs/
+│   ├── ENDPOINTS.md
+│   ├── FAQ.md
+│   ├── GLOSSARY.md
+│   ├── README.md
+│   ├── RUNBOOK.md
+│   ├── TROUBLESHOOTING.md
+│   └── architecture.md
+├── scripts/
+│   └── health-check.sh
 └── services/
-    ├── analytics-py/          # Python analytics service
+    ├── analytics-py/          # Python analytics service (Flask)
     │   ├── Dockerfile
     │   ├── app.py
     │   ├── requirements.txt
     │   ├── requirements-dev.txt
-    │   ├── test_app.py
-    │   └── test_middleware.py
-    ├── processor-go/          # Go message processor
+    │   └── test_*.py
+    ├── processor-go/          # Go message processor (net/http)
     │   ├── Dockerfile
     │   ├── go.mod
     │   ├── main.go
-    │   └── main_test.go
-    └── usermgmt-ts/           # TypeScript user management
+    │   └── *_test.go
+    └── usermgmt-ts/           # TypeScript user management (Express)
         ├── Dockerfile
         ├── package.json
+        ├── package-lock.json
         ├── tsconfig.json
         ├── jest.config.js
         ├── .eslintrc.json
         └── src/
             ├── app.ts
-            └── app.test.ts
+            └── *.test.ts
 ```
 
 ## Documentation
