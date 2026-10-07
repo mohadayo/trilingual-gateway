@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS builder
+FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --chown=node:node package*.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ COPY --chown=node:node tsconfig.json .
 COPY --chown=node:node src/ src/
 RUN npm run build
 
-FROM node:22-alpine
+FROM node:20-alpine
 WORKDIR /app
 COPY --chown=node:node package*.json ./
 RUN npm ci --omit=dev
