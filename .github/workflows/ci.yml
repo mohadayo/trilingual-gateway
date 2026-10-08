@@ -60,7 +60,10 @@ jobs:
           # cache-dependency-path は go.mod を指す（setup-go v5 は go.mod でもハッシュを取れる）
           cache-dependency-path: services/processor-go/go.mod
       - run: go vet ./...
-      - run: go test -v ./...
+      # race detector を有効化する。Makefile の `test-go` ターゲットおよび
+      # docs/architecture.md §3.2 と整合させ、sync.RWMutex / channel ベースの
+      # 並行処理コードに対するデータレース検知をローカルと CI で揃える。
+      - run: go test -race -v ./...
 
   test-typescript:
     runs-on: ubuntu-latest
