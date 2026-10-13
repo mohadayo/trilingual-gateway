@@ -140,7 +140,11 @@ type messageFilters struct {
 // 解析失敗時は errMsg を返す（呼び出し側で 400 を返す）。
 func parseMessageFilters(query url.Values) (messageFilters, string) {
 	var f messageFilters
-	f.channel = query.Get("channel")
+	// publishHandler は channel を strings.TrimSpace してから保存するため、
+	// 読み取り側 (GET / DELETE /api/messages 他) でもクエリの channel を
+	// TrimSpace して対称にする。先頭/末尾に空白を付けただけで
+	// 保存済みメッセージが silent empty-result になるのを防ぐ。
+	f.channel = strings.TrimSpace(query.Get("channel"))
 
 	q, qErr := normalizeSearchQuery(query.Get("q"))
 	if qErr != nil {

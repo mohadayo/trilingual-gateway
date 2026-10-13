@@ -289,7 +289,12 @@ def list_events():
 
 @app.route("/api/events", methods=["DELETE"])
 def delete_events():
-    event_name = request.args.get("event_name")
+    # track_event 側は event_name を .strip() してから保存する。
+    # 読み取り/削除側でも揃えないと `?event_name=%20login` のように
+    # 先頭/末尾に空白が付いただけで保存済みの `login` にヒットせず、
+    # silent empty-result (deleted_count=0) になってしまう。
+    # 空白のみは「指定なし」と等価に扱い、既存の 400 分岐にフォールスルーさせる。
+    event_name = request.args.get("event_name", "").strip() or None
     since_raw = request.args.get("since")
     until_raw = request.args.get("until")
 

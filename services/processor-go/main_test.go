@@ -119,6 +119,36 @@ func TestFilterByChannel(t *testing.T) {
 	}
 }
 
+// TestGetMessages_TrimsChannelFilterWhitespace は、クライアントが
+// `?channel=%20foo%20` のように前後に空白を付けた channel クエリで
+// GET /api/messages を叩いた場合でも、publishHandler が TrimSpace して
+// 保存した `foo` にヒットすることを検証する（silent empty-result 回避）。
+func TestGetMessages_TrimsChannelFilterWhitespace(t *testing.T) {
+	resetMessages()
+
+	body, _ := json.Marshal(map[string]string{"channel": "foo", "payload": "bar"})
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	publishHandler(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("publish: expected 201, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/messages?channel=%20foo%20", nil)
+	w = httptest.NewRecorder()
+	messagesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["count"].(float64)) < 1 {
+		t.Fatalf("expected at least 1 message with trimmed channel=foo, got %v", resp["count"])
+	}
+}
+
 func TestStatsHandler(t *testing.T) {
 	resetMessages()
 
