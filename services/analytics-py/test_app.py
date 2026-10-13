@@ -205,6 +205,25 @@ def test_delete_events_by_event_name(client):
     assert remaining == ["view"]
 
 
+def test_delete_events_trims_event_name(client):
+    # track_event は event_name を .strip() してから保存するため、
+    # delete_events もクエリの event_name を .strip() して対称にしないと
+    # `?event_name=%20login%20` が保存済み `login` にヒットせず
+    # silent empty-result (deleted_count=0) になる。回帰テストで固定する。
+    _post_event(client, "login")
+    _post_event(client, "logout")
+    resp = client.delete("/api/events?event_name=%20login%20")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["deleted_count"] == 1
+    # 後続 GET でも `login` が 0 件であることを確認する。
+    follow = client.get("/api/events?event_name=login")
+    assert follow.status_code == 200
+    assert follow.get_json()["count"] == 0
+    remaining = [e["event_name"] for e in events_store]
+    assert remaining == ["logout"]
+
+
 # ---- GET /api/events/count ----
 
 
