@@ -1,0 +1,118 @@
+# Dependabot 設定
+# 全マイクロサービスの依存パッケージを週次で監視する。
+
+version: 2
+
+updates:
+  # analytics-py (Python)
+  - package-ecosystem: "pip"
+    directory: "/services/analytics-py"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(analytics-py)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+      - "analytics-py"
+
+  # processor-go (Go)
+  - package-ecosystem: "gomod"
+    directory: "/services/processor-go"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(processor-go)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "go"
+      - "processor-go"
+
+  # usermgmt-ts (Node.js / TypeScript)
+  - package-ecosystem: "npm"
+    directory: "/services/usermgmt-ts"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(usermgmt-ts)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "usermgmt-ts"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Docker (各サービスの Dockerfile を監視)
+  - package-ecosystem: "docker"
+    directory: "/services/analytics-py"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(analytics-py)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/services/processor-go"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(processor-go)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/services/usermgmt-ts"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(usermgmt-ts)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
