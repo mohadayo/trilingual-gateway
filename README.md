@@ -51,10 +51,11 @@ graph TB
 
 ```bash
 cp .env.example .env
-make up        # Build and start all services
-make ps        # Check service status
-make logs      # Tail logs
-make down      # Stop all services
+make up            # Build and start all services
+make health-check  # Smoke-test the 3 /health endpoints via scripts/health-check.sh
+make ps            # Check service status
+make logs          # Tail logs
+make down          # Stop all services
 ```
 
 ### Run Tests Locally

@@ -1,4 +1,4 @@
-.PHONY: help test test-python test-go test-ts up down build lint logs ps clean
+.PHONY: help test test-python test-go test-ts up down build lint logs ps clean health-check
 
 # `make` を引数なしで叩いた場合はターゲット一覧を表示する。
 .DEFAULT_GOAL := help
@@ -37,6 +37,9 @@ logs: ## docker compose のログをフォロー
 
 ps: ## docker compose サービスの状態一覧
 	docker compose ps
+
+health-check: ## 3 サービスの /health を疎通確認 (scripts/health-check.sh)
+	bash scripts/health-check.sh
 
 clean: ## テスト・ビルド成果物とキャッシュを削除
 	find services/analytics-py -type d -name __pycache__ -prune -exec rm -rf {} +
