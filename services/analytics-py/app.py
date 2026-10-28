@@ -107,7 +107,13 @@ def track_event():
         return jsonify({"error": "Payload too large", "max_bytes": MAX_PAYLOAD_SIZE}), 413
 
     data = request.get_json(silent=True)
-    if not data or "event_name" not in data:
+    # `request.get_json(silent=True)` は JSON のスカラ (`true` / `5` / `null`) をそれぞれ
+    # Python の `True` / `5` / `None` として返す。`None` や `False` / `0` は `not data` で
+    # 捕まるが、`True` や非ゼロ数値は第 1 条件を通過したあと `"event_name" not in True` で
+    # `TypeError: argument of type 'bool' is not iterable` を送出し 500 になる。ボディが
+    # dict でない場合は早期に 400 を返し、他の不正入力 (`event_name` 欠落 / 不正型) と
+    # 同じエラー経路に揃える。
+    if not isinstance(data, dict) or "event_name" not in data:
         logger.warning("Invalid event payload received")
         return jsonify({"error": "event_name is required"}), 400
 
