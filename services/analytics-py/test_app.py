@@ -121,6 +121,51 @@ def test_track_event_invalid_json(client):
     assert resp.status_code == 400
 
 
+# ---------- Scalar JSON body regression (GH-226) ----------
+#
+# `request.get_json(silent=True)` は JSON のスカラ (`true` / `5` / `null`) を
+# それぞれ Python の `True` / `5` / `None` として返す。`None` や `False` / `0`
+# は従来の `if not data` で捕まるが、`True` や非ゼロ数値は条件を素通りして
+# `"event_name" not in True` で `TypeError: argument of type 'bool' is not
+# iterable` を送出し、Flask が 500 を返していた。dict 以外の JSON ボディは
+# すべて 400 に落とす経路に揃えたため、以下 3 ケースを固定する。
+
+
+def test_track_event_boolean_body_returns_400(client):
+    resp = client.post(
+        "/api/events",
+        data=json.dumps(True),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "event_name" in resp.get_json()["error"]
+    # 不正ボディが silent にストアされないことも併せて確認する。
+    assert len(events_store) == 0
+
+
+def test_track_event_number_body_returns_400(client):
+    resp = client.post(
+        "/api/events",
+        data=json.dumps(5),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "event_name" in resp.get_json()["error"]
+    assert len(events_store) == 0
+
+
+def test_track_event_null_body_returns_400(client):
+    # 既存挙動 (`None` → `not data` で 400) の明示的な回帰防止。
+    resp = client.post(
+        "/api/events",
+        data=json.dumps(None),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "event_name" in resp.get_json()["error"]
+    assert len(events_store) == 0
+
+
 # ---- GET /api/events ----
 
 
