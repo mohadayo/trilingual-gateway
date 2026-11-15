@@ -198,6 +198,7 @@ curl http://localhost:8001/api/events/by_month
 - `channel`: 必須、トリム後 1〜`MAX_CHANNEL_LENGTH`（既定 256）文字
 - `payload`: 必須、トリム後 1〜`MAX_PAYLOAD_LENGTH`（既定 65536）文字
 - 空白のみの値や長さ超過は 400 を返す
+- リクエストボディ全体が `MAX_PUBLISH_BODY_BYTES`（既定 `MAX_CHANNEL_LENGTH + MAX_PAYLOAD_LENGTH + 16384` バイト）を超えると 413 を返す
 
 **Example:**
 ```bash
@@ -285,6 +286,7 @@ See [`.env.example`](.env.example) for all available configuration:
 | `MAX_MESSAGES` | 10000 | processor-go: メモリ上に保持する最大メッセージ数（超過時は古いものから追い出し） |
 | `MAX_CHANNEL_LENGTH` | 256 | processor-go: `POST /api/messages` の `channel` の最大文字数 |
 | `MAX_PAYLOAD_LENGTH` | 65536 | processor-go: `POST /api/messages` の `payload` の最大文字数 |
+| `MAX_PUBLISH_BODY_BYTES` | `MAX_CHANNEL_LENGTH + MAX_PAYLOAD_LENGTH + 16384` | processor-go: `POST /api/messages` のリクエストボディ最大バイト数（超過時 413） |
 | `PROCESSOR_PORT` | 8002 | Processor service port |
 | `PROCESSOR_READ_HEADER_TIMEOUT` | 5 | processor-go: ヘッダ読み取りタイムアウト秒（Slowloris 対策） |
 | `PROCESSOR_READ_TIMEOUT` | 15 | processor-go: 本文読み取りタイムアウト秒 |

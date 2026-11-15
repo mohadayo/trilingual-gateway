@@ -32,6 +32,8 @@
 ### Fixed
 
 - （バグ修正をここに記載）
+- **processor-go**: `POST /api/messages` のボディ上限が 64 KiB 固定だったため、`MAX_PAYLOAD_LENGTH` 既定値 (65536) ちょうどの payload が 413 になり、`MAX_PAYLOAD_LENGTH` を引き上げても効かなかった問題を修正。上限を `MAX_CHANNEL_LENGTH + MAX_PAYLOAD_LENGTH + 16384` から導出し、`MAX_PUBLISH_BODY_BYTES` で上書き可能にした。
+- **processor-go**: 405 応答に `Allow` ヘッダを付与（`/api/messages`: `GET, POST, DELETE`、`/api/stats`: `GET`）。ボディ上限超過の判定をエラー文字列比較から `errors.As(*http.MaxBytesError)` に変更。
 
 ### Security
 
