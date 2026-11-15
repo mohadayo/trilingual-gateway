@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -72,6 +73,7 @@ var (
 	maxChannelLength  int
 	maxPayloadLength  int
 	maxSearchLength   int
+	maxPublishBody    int64
 	readHeaderTimeout time.Duration
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
@@ -104,10 +106,32 @@ func init() {
 	maxChannelLength = envInt("MAX_CHANNEL_LENGTH", 256)
 	maxPayloadLength = envInt("MAX_PAYLOAD_LENGTH", 65536)
 	maxSearchLength = envInt("MAX_SEARCH_LENGTH", 100)
+	maxPublishBody = int64(envInt("MAX_PUBLISH_BODY_BYTES", defaultPublishBodyLimit(maxChannelLength, maxPayloadLength)))
 	readHeaderTimeout = envSeconds("PROCESSOR_READ_HEADER_TIMEOUT", 5*time.Second)
 	readTimeout = envSeconds("PROCESSOR_READ_TIMEOUT", 15*time.Second)
 	writeTimeout = envSeconds("PROCESSOR_WRITE_TIMEOUT", 15*time.Second)
 	idleTimeout = envSeconds("PROCESSOR_IDLE_TIMEOUT", 60*time.Second)
+}
+
+// publishBodyOverhead は POST /api/messages のボディ上限を channel / payload の
+// 最大長から導出する際に上乗せする JSON エンベロープ分の余裕（キー名・引用符・
+// エスケープ・空白など）。
+const publishBodyOverhead = 16 * 1024
+
+// defaultPublishBodyLimit は MAX_PUBLISH_BODY_BYTES 未指定時のボディ上限を返す。
+// 以前は 64 KiB 固定だったため、MAX_PAYLOAD_LENGTH の既定値 (65536) ちょうどの
+// payload が JSON エンベロープ分だけ上限を超えて 413 になり、MAX_PAYLOAD_LENGTH を
+// 引き上げても効かなかった。最大長 + 余裕で導出し、両者の整合を保つ。
+func defaultPublishBodyLimit(maxChannel, maxPayload int) int {
+	return maxChannel + maxPayload + publishBodyOverhead
+}
+
+// writeMethodNotAllowed は 405 を JSON で返し、RFC 9110 に従い Allow ヘッダを付与する。
+func writeMethodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusMethodNotAllowed)
+	json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
 }
 
 // normalizeSearchQuery は `q` クエリを正規化する。
@@ -238,13 +262,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func publishHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, maxPublishBody)
 
 	var input struct {
 		Channel string `json:"channel"`
@@ -252,11 +274,14 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		if err.Error() == "http: request body too large" {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			logger.Printf("Publish rejected: request body exceeds %d bytes", mbe.Limit)
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			json.NewEncoder(w).Encode(ErrorResponse{Error: "request body too large"})
 			return
 		}
+		logger.Printf("Publish rejected: invalid JSON body: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "invalid JSON body"})
 		return
@@ -751,9 +776,7 @@ func topChannelsFromCounts(counts map[string]int, limit int) []map[string]interf
 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
+		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1292,6 +1315,23 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// messagesAllowedMethods は `/api/messages` が受け付けるメソッド（405 の Allow ヘッダ用）。
+const messagesAllowedMethods = "GET, POST, DELETE"
+
+// messagesRouter は `/api/messages` をメソッドごとのハンドラへ振り分ける。
+func messagesRouter(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		messagesHandler(w, r)
+	case http.MethodPost:
+		publishHandler(w, r)
+	case http.MethodDelete:
+		deleteMessagesHandler(w, r)
+	default:
+		writeMethodNotAllowed(w, messagesAllowedMethods)
+	}
+}
+
 func main() {
 	port := os.Getenv("PROCESSOR_PORT")
 	if port == "" {
@@ -1300,20 +1340,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			messagesHandler(w, r)
-		case http.MethodPost:
-			publishHandler(w, r)
-		case http.MethodDelete:
-			deleteMessagesHandler(w, r)
-		default:
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
-		}
-	})
+	mux.HandleFunc("/api/messages", messagesRouter)
 	// distinct な channel 一覧。`GET /api/messages/{id}` ワイルドカードよりも
 	// リテラルパターンが優先されるため、`channels` を ID として誤解されない。
 	mux.HandleFunc("GET /api/messages/channels", messageChannelsHandler)
