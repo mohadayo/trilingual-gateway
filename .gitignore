@@ -10,6 +10,8 @@ venv/
 
 # Go
 /services/processor-go/processor
+# `go test -coverprofile=coverage.out` の標準的な出力ファイル名
+/services/processor-go/coverage.out
 
 # Node / TypeScript
 # NOTE: services/usermgmt-ts/package-lock.json は
@@ -17,6 +19,10 @@ venv/
 # 前提でコミットしているため、ここでは ignore しない。
 node_modules/
 /services/usermgmt-ts/dist/
+# `jest --coverage` が出力するカバレッジレポート (Makefile の clean 対象と対応)
+/services/usermgmt-ts/coverage/
+# tsc の incremental / composite build が生成する中間ファイル
+*.tsbuildinfo
 
 # Environment
 .env
