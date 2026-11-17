@@ -80,6 +80,10 @@ jobs:
           cache-dependency-path: services/usermgmt-ts/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      # Makefile の `lint` ターゲットと整合する ESLint を CI でも実行する。
+      # package.json の `"lint": "eslint src/"` と `.eslintrc.json` をそのまま利用し、
+      # 追加依存なしで TypeScript サービスの静的解析違反を PR 時点で検知する。
+      - run: npm run lint
       - run: npm test
 
   docker-build:
