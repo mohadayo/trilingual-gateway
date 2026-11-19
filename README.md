@@ -359,6 +359,7 @@ trilingual-gateway/
 - [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — 3 サービス横断で使う用語（アーキテクチャ / ドメイン / 集計エンドポイント / 共通クエリ / 観測性 / 環境変数命名規約）の用語集
 - [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md) — 3 サービスの REST エンドポイントを 1 枚で横断表示するリファレンス（集計エンドポイントの対応マトリクス付き）
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — インシデント初動フロー・サービス別リカバリ手順・エスカレーション基準の運用ランブック
+- [`docs/TESTING.md`](docs/TESTING.md) — 3 サービス横断のテスト運用一次情報（テスト配置とランナーの対応表、`make test` / `make lint` と `.github/workflows/ci.yml` の対応、Go 側で `-race` を既定化している意図、新規テスト追加時のサービス別チェックリスト）
 
 コントリビュートのガイドは [`CONTRIBUTING.md`](CONTRIBUTING.md)、コミュニティ規範は [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、セキュリティ報告は [`SECURITY.md`](SECURITY.md) を参照してください。
 
