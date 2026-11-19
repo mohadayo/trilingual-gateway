@@ -152,7 +152,7 @@ curl http://localhost:8001/api/events/by_month
 | GET | `/api/messages/by_hour_of_day` | UTC 時刻 (`00`〜`23`) 別の周期分布。1 日内の流量集中を把握、populated-only で時間順 |
 | GET | `/api/messages/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) 別の周期分布。曜日別キャパシティプランニング用途、populated-only で曜日順 |
 | GET | `/api/messages/{id}` | Get a single message by ID（該当なしは `404`） |
-| DELETE | `/api/messages` | `channel` / `since` / `before` の AND で一致するメッセージを削除（少なくとも 1 フィルタ必須。`since` は包含、`before` は排他で半開区間 `[since, before)` を表現） |
+| DELETE | `/api/messages` | `channel` / `since` / `before` の AND で一致するメッセージを削除(少なくとも 1 フィルタ必須。`since` は包含、`before` は排他で半開区間 `[since, before)` を表現) |
 | DELETE | `/api/messages/{id}` | 単一メッセージを ID 指定で削除。レスポンスに削除前のメッセージ内容を含め、別 GET なしで監査ログに残せる。該当なしは `404` |
 | GET | `/api/stats` | Message count per channel（`?channel=` / `?q=` / `?since=` / `?until=` / `?top_channels_limit=` でフィルタ後の集計を返す） |
 
@@ -359,6 +359,7 @@ trilingual-gateway/
 - [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — 3 サービス横断で使う用語（アーキテクチャ / ドメイン / 集計エンドポイント / 共通クエリ / 観測性 / 環境変数命名規約）の用語集
 - [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md) — 3 サービスの REST エンドポイントを 1 枚で横断表示するリファレンス（集計エンドポイントの対応マトリクス付き）
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — インシデント初動フロー・サービス別リカバリ手順・エスカレーション基準の運用ランブック
+- [`docs/TESTING.md`](docs/TESTING.md) — 3 サービス横断のテスト運用一次情報（テスト配置とランナーの対応表、`make test` / `make lint` と `.github/workflows/ci.yml` の対応、Go 側で `-race` を既定化している意図、新規テスト追加時のサービス別チェックリスト）
 
 コントリビュートのガイドは [`CONTRIBUTING.md`](CONTRIBUTING.md)、コミュニティ規範は [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、セキュリティ報告は [`SECURITY.md`](SECURITY.md) を参照してください。
 
