@@ -44,4 +44,6 @@ health-check: ## 3 サービスの /health を疎通確認 (scripts/health-check
 clean: ## テスト・ビルド成果物とキャッシュを削除
 	find services/analytics-py -type d -name __pycache__ -prune -exec rm -rf {} +
 	find services/analytics-py -type d -name .pytest_cache -prune -exec rm -rf {} +
+	rm -f services/processor-go/processor services/processor-go/coverage.out
 	rm -rf services/usermgmt-ts/node_modules services/usermgmt-ts/dist services/usermgmt-ts/coverage
+	find services/usermgmt-ts -maxdepth 2 -type f -name '*.tsbuildinfo' -delete
